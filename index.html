@@ -3,27 +3,252 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>HailScope — Hail Damage Estimator</title>
+  <!-- Apple PWA meta tags -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="HailSpec">
+  <meta name="theme-color" content="#ffffff">
+  <title>HailSpec — NTX Hail Estimator</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-  <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/@babel/standalone@7.24.0/babel.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
+    :root {
+      /* NTX Hail Brand Colors — Light Mode */
+      --navy:        #0a1628;
+      --navy-mid:    #0d1f3c;
+      --bg:          #f8fafc;
+      --bg-card:     #ffffff;
+      --bg-card2:    #f1f5f9;
+      --blue:        #2563eb;
+      --blue-light:  #3b82f6;
+      --blue-dim:    rgba(37,99,235,0.08);
+      --blue-border: rgba(37,99,235,0.25);
+      --red:         #dc2626;
+      --red-light:   #ef4444;
+      --red-dim:     rgba(220,38,38,0.07);
+      --red-border:  rgba(220,38,38,0.3);
+      --orange:      #f97316;
+      --text:        #0f172a;
+      --text-mid:    #334155;
+      --text-muted:  #64748b;
+      --border:      #e2e8f0;
+      --shadow:      0 1px 4px rgba(0,0,0,0.07), 0 4px 16px rgba(0,0,0,0.05);
+      --shadow-md:   0 2px 8px rgba(0,0,0,0.08), 0 8px 24px rgba(0,0,0,0.06);
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body, #root { height: 100%; width: 100%; }
-    body { font-family: 'DM Sans', sans-serif; background: #0c1222; overflow-x: hidden; }
+    body { font-family: 'DM Sans', sans-serif; background: var(--bg); overflow-x: hidden; }
     input, select, button { font-family: 'DM Sans', sans-serif; }
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.2); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.25); border-radius: 4px; }
   </style>
 </head>
 <body>
-  <div id="root"><div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#94a3b8;font-family:system-ui;font-size:16px">Loading HailScope...</div></div>
-  <script type="text/babel" data-type="module">
-    const { useState, useCallback, useRef } = React;
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useCallback, useRef, useEffect } = React;
 
+// ─── SUPABASE CONFIG ──────────────────────────────────────────────────────────
+// 🔧 SETUP: Replace these two values with your Supabase project credentials.
+//    Dashboard → Settings → API → Project URL & anon/public key
+const SUPABASE_URL  = "https://YOUR_PROJECT.supabase.co";
+const SUPABASE_ANON = "YOUR_ANON_KEY";
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+// ─── CARRIERS ────────────────────────────────────────────────────────────────
+// Carrier list — matrices for non-State Farm carriers are placeholders.
+// To fill a carrier matrix: copy PRICING_MATRIX structure and assign to
+// CARRIER_MATRICES["Allstate"] etc. Pricing of $0 = "R&R recommended" behavior.
+const CARRIERS = [
+  { id: "state_farm",  label: "State Farm",  color: "#dc2626", badge: "SF"  },
+  { id: "allstate",    label: "Allstate",    color: "#0066cc", badge: "AL"  },
+  { id: "farmers",     label: "Farmers",     color: "#e07b00", badge: "FM"  },
+  { id: "geico",       label: "GEICO",       color: "#00a651", badge: "GE"  },
+  { id: "progressive", label: "Progressive", color: "#0066ff", badge: "PR"  },
+  { id: "nationwide",  label: "Nationwide",  color: "#1a1a6e", badge: "NW"  },
+  { id: "custom",      label: "Custom",      color: "#64748b", badge: "CX"  },
+];
+
+// Carrier-specific pricing matrices.
+// State Farm is fully populated. All others are stubs — same panel keys,
+// prices set to 0 which triggers "R&R recommended" until you fill them in.
+const CARRIER_MATRICES = {
+  state_farm: null, // uses the global PRICING_MATRIX below
+  allstate:    null, // stub — fill in to activate
+  farmers:     null,
+  geico:       null,
+  progressive: null,
+  nationwide:  null,
+  custom:      null,
+};
+
+function getMatrix(carrierId) {
+  return CARRIER_MATRICES[carrierId] || PRICING_MATRIX;
+}
+
+// ─── AUTH MODAL ───────────────────────────────────────────────────────────────
+function AuthModal({ onAuth, onClose }) {
+  const [mode, setMode] = useState("login"); // login | signup | reset
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const handle = async () => {
+    setLoading(true); setError(""); setSuccess("");
+    try {
+      if (mode === "reset") {
+        const { error: e } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: window.location.href,
+        });
+        if (e) throw e;
+        setSuccess("Password reset email sent — check your inbox.");
+      } else if (mode === "signup") {
+        const { data, error: e } = await supabase.auth.signUp({ email, password });
+        if (e) throw e;
+        setSuccess("Account created! Check your email to confirm, then log in.");
+      } else {
+        const { data, error: e } = await supabase.auth.signInWithPassword({ email, password });
+        if (e) throw e;
+        onAuth(data.user);
+      }
+    } catch (e) {
+      setError(e.message || "Something went wrong.");
+    }
+    setLoading(false);
+  };
+
+  const S = styles;
+  return (
+    <div style={S.modalOverlay} onClick={onClose}>
+      <div style={{ ...S.modalContent, borderTop: "3px solid #2563eb" }} onClick={e => e.stopPropagation()}>
+        <div style={S.modalHeader}>
+          <div>
+            <div style={S.modalTitle}>{mode === "login" ? "Sign In" : mode === "signup" ? "Create Account" : "Reset Password"}</div>
+            <div style={S.modalSubtitle}>HailSpec — NTX Hail Estimator</div>
+          </div>
+          <button onClick={onClose} style={S.closeBtn}>✕</button>
+        </div>
+        <div style={{ ...S.modalBody, paddingTop: 24 }}>
+          {/* Mode tabs */}
+          <div style={{ display: "flex", gap: 6, marginBottom: 24 }}>
+            {["login","signup"].map(m => (
+              <button key={m} onClick={() => { setMode(m); setError(""); setSuccess(""); }}
+                style={{ flex:1, padding:"9px", borderRadius:8, border:"1.5px solid", fontSize:13, fontWeight:700, cursor:"pointer",
+                  background: mode===m ? "#eff6ff" : "#f8fafc",
+                  borderColor: mode===m ? "#3b82f6" : "#e2e8f0",
+                  color: mode===m ? "#2563eb" : "#64748b" }}>
+                {m === "login" ? "Sign In" : "Create Account"}
+              </button>
+            ))}
+          </div>
+
+          <label style={S.vfLabel}>Email</label>
+          <input type="email" value={email} onChange={e => setEmail(e.target.value)}
+            style={{ ...S.vfInput, marginBottom: 12 }} placeholder="you@example.com" autoFocus />
+
+          {mode !== "reset" && (
+            <>
+              <label style={S.vfLabel}>Password</label>
+              <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+                style={{ ...S.vfInput, marginBottom: 4 }} placeholder="••••••••"
+                onKeyDown={e => e.key === "Enter" && handle()} />
+              {mode === "login" && (
+                <button onClick={() => { setMode("reset"); setError(""); setSuccess(""); }}
+                  style={{ background:"none", border:"none", color:"#3b82f6", fontSize:12, fontWeight:600, cursor:"pointer", padding:"6px 0", textAlign:"left" }}>
+                  Forgot password?
+                </button>
+              )}
+            </>
+          )}
+
+          {error   && <div style={{ marginTop:12, padding:"10px 14px", background:"#fef2f2", border:"1px solid #fecaca", borderRadius:8, color:"#dc2626", fontSize:13 }}>{error}</div>}
+          {success && <div style={{ marginTop:12, padding:"10px 14px", background:"#f0fdf4", border:"1px solid #86efac", borderRadius:8, color:"#16a34a", fontSize:13 }}>{success}</div>}
+        </div>
+        <div style={S.modalFooter}>
+          <button onClick={handle} disabled={loading || !email || (mode!=="reset" && !password)}
+            style={{ ...S.saveBtn, opacity: (loading || !email || (mode!=="reset" && !password)) ? 0.5 : 1 }}>
+            {loading ? "Please wait…" : mode === "login" ? "Sign In" : mode === "signup" ? "Create Account" : "Send Reset Email"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SAVED ESTIMATES LIST ─────────────────────────────────────────────────────
+function SavedEstimatesList({ user, onLoad, onClose }) {
+  const [estimates, setEstimates] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function load() {
+      const { data } = await supabase
+        .from("estimates")
+        .select("id, created_at, updated_at, vehicle_info, grand_total, carrier_id, panel_count")
+        .eq("user_id", user.id)
+        .order("updated_at", { ascending: false })
+        .limit(50);
+      setEstimates(data || []);
+      setLoading(false);
+    }
+    load();
+  }, [user.id]);
+
+  const handleDelete = async (id) => {
+    await supabase.from("estimates").delete().eq("id", id);
+    setEstimates(prev => prev.filter(e => e.id !== id));
+  };
+
+  const S = styles;
+  return (
+    <div style={S.modalOverlay} onClick={onClose}>
+      <div style={{ ...S.modalContent, borderTop: "3px solid #2563eb" }} onClick={e => e.stopPropagation()}>
+        <div style={S.modalHeader}>
+          <div><div style={S.modalTitle}>Saved Estimates</div><div style={S.modalSubtitle}>{user.email}</div></div>
+          <button onClick={onClose} style={S.closeBtn}>✕</button>
+        </div>
+        <div style={{ ...S.modalBody, paddingTop: 16 }}>
+          {loading && <div style={{ textAlign:"center", color:"#94a3b8", padding:32 }}>Loading…</div>}
+          {!loading && estimates.length === 0 && (
+            <div style={{ textAlign:"center", color:"#94a3b8", padding:32 }}>
+              <div style={{ fontSize:32, marginBottom:8 }}>📋</div>
+              <div style={{ fontWeight:600 }}>No saved estimates yet</div>
+              <div style={{ fontSize:13, marginTop:4 }}>Estimates auto-save as you build.</div>
+            </div>
+          )}
+          {estimates.map(est => {
+            const v = est.vehicle_info || {};
+            const vehicle = [v.year, v.make, v.model].filter(Boolean).join(" ") || "No vehicle";
+            const carrier = CARRIERS.find(c => c.id === est.carrier_id);
+            const date = new Date(est.updated_at).toLocaleDateString("en-US", { month:"short", day:"numeric", year:"numeric" });
+            return (
+              <div key={est.id} style={{ background:"#ffffff", border:"1px solid #e2e8f0", borderRadius:12, padding:"14px 16px", marginBottom:8, boxShadow:"0 1px 4px rgba(0,0,0,0.05)" }}>
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
+                  <div style={{ fontWeight:700, fontSize:14, color:"#0f172a" }}>{v.owner || "No owner"}</div>
+                  <div style={{ fontWeight:800, fontSize:15, color:"#2563eb" }}>${(est.grand_total||0).toLocaleString()}</div>
+                </div>
+                <div style={{ fontSize:12, color:"#64748b", marginBottom:10 }}>
+                  {vehicle} {v.claim ? `• #${v.claim}` : ""} • {est.panel_count || 0} panels • {carrier?.label || "State Farm"} • {date}
+                </div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <button onClick={() => onLoad(est)} style={{ flex:1, background:"#2563eb", border:"none", borderRadius:8, padding:"9px", color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer" }}>Load</button>
+                  <button onClick={() => handleDelete(est.id)} style={{ background:"#fef2f2", border:"1px solid #fecaca", borderRadius:8, padding:"9px 14px", color:"#dc2626", fontSize:13, fontWeight:600, cursor:"pointer" }}>Delete</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ─── STATE FARM PRICING MATRIX ──────────────────────────────────────────────
 const PRICING_MATRIX = {
@@ -141,7 +366,6 @@ const PANEL_LABELS = {
   RQ: "Right Quarter", RRAIL: "Right Rail",
 };
 
-// R&I default operations per panel (hours)
 const RI_OPERATIONS = {
   HOOD: [
     { id: "front_bumper", name: "Front Bumper", time: 1.0 },
@@ -224,7 +448,6 @@ const RI_OPERATIONS = {
 };
 
 const DEFAULT_LABOR_RATE = 60;
-
 const DENT_SIZES = ["DIME", "NICKEL", "QUARTER", "HALF"];
 const DENT_SIZE_LABELS = { DIME: "Dime", NICKEL: "Nickel", QUARTER: "Quarter", HALF: "Half Dollar" };
 
@@ -233,9 +456,7 @@ function lookupPrice(panel, count, size) {
   const rows = PRICING_MATRIX[panel];
   if (!rows) return 0;
   for (const row of rows) {
-    if (count >= row.min && count <= row.max) {
-      return row[size] || 0;
-    }
+    if (count >= row.min && count <= row.max) return row[size] || 0;
   }
   return 0;
 }
@@ -246,21 +467,21 @@ function getMaxCount(panel) {
   return rows[rows.length - 1].max;
 }
 
-// ─── CAR SVG COMPONENT ─────────────────────────────────────────────────────
+// ─── CAR SVG ────────────────────────────────────────────────────────────────
 function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
   const panelPaths = {
-    HOOD: { d: "M155,45 C155,30 185,15 210,12 C235,15 265,30 265,45 L265,115 C265,120 260,125 255,125 L165,125 C160,125 155,120 155,115 Z", cx: 210, cy: 70 },
-    LFF: { d: "M100,35 L150,20 L150,125 L100,110 Z", cx: 120, cy: 72 },
-    RFF: { d: "M270,20 L320,35 L320,110 L270,125 Z", cx: 300, cy: 72 },
-    LFD: { d: "M95,118 L148,128 L148,250 L95,240 Z", cx: 118, cy: 184 },
-    RFD: { d: "M272,128 L325,118 L325,240 L272,250 Z", cx: 302, cy: 184 },
+    HOOD:  { d: "M155,45 C155,30 185,15 210,12 C235,15 265,30 265,45 L265,115 C265,120 260,125 255,125 L165,125 C160,125 155,120 155,115 Z", cx: 210, cy: 70 },
+    LFF:   { d: "M100,35 L150,20 L150,125 L100,110 Z", cx: 120, cy: 72 },
+    RFF:   { d: "M270,20 L320,35 L320,110 L270,125 Z", cx: 300, cy: 72 },
+    LFD:   { d: "M95,118 L148,128 L148,250 L95,240 Z", cx: 118, cy: 184 },
+    RFD:   { d: "M272,128 L325,118 L325,240 L272,250 Z", cx: 302, cy: 184 },
     LRAIL: { d: "M148,140 L175,140 L175,310 L148,310 Z", cx: 162, cy: 225 },
     RRAIL: { d: "M245,140 L272,140 L272,310 L245,310 Z", cx: 258, cy: 225 },
-    ROOF: { d: "M175,130 L245,130 L250,145 L250,300 L245,315 L175,315 L170,300 L170,145 Z", cx: 210, cy: 222 },
-    LRD: { d: "M95,248 L148,258 L148,370 L95,355 Z", cx: 118, cy: 310 },
-    RRD: { d: "M272,258 L325,248 L325,355 L272,370 Z", cx: 302, cy: 310 },
-    LQ: { d: "M100,362 L150,375 L150,430 L120,440 L100,430 Z", cx: 122, cy: 400 },
-    RQ: { d: "M270,375 L320,362 L320,430 L300,440 L270,430 Z", cx: 298, cy: 400 },
+    ROOF:  { d: "M175,130 L245,130 L250,145 L250,300 L245,315 L175,315 L170,300 L170,145 Z", cx: 210, cy: 222 },
+    LRD:   { d: "M95,248 L148,258 L148,370 L95,355 Z", cx: 118, cy: 310 },
+    RRD:   { d: "M272,258 L325,248 L325,355 L272,370 Z", cx: 302, cy: 310 },
+    LQ:    { d: "M100,362 L150,375 L150,430 L120,440 L100,430 Z", cx: 122, cy: 400 },
+    RQ:    { d: "M270,375 L320,362 L320,430 L300,440 L270,430 Z", cx: 298, cy: 400 },
     TRUNK: { d: "M155,400 L265,400 L265,445 C265,460 255,470 240,475 L180,475 C165,470 155,460 155,445 Z", cx: 210, cy: 438 },
   };
 
@@ -273,26 +494,22 @@ function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
 
   const getColor = (panel) => {
     const d = panelData[panel];
-    if (d && d.rrEnabled) return "rgba(239,68,68,0.5)";
-    if (d && d.convEnabled) return "rgba(251,146,60,0.5)";
+    if (d && d.rrEnabled)   return "rgba(220,38,38,0.5)";
+    if (d && d.convEnabled) return "rgba(249,115,22,0.5)";
     const heat = getHeat(panel);
-    if (heat <= 0) return "rgba(200,210,220,0.3)";
-    if (heat < 0.25) return "rgba(52,211,153,0.55)";
-    if (heat < 0.5) return "rgba(251,191,36,0.6)";
-    if (heat < 0.75) return "rgba(251,146,60,0.7)";
-    return "rgba(239,68,68,0.75)";
+    if (heat <= 0)    return "rgba(241,245,249,0.9)";
+    if (heat < 0.25)  return "rgba(37,99,235,0.25)";
+    if (heat < 0.5)   return "rgba(59,130,246,0.4)";
+    if (heat < 0.75)  return "rgba(249,115,22,0.5)";
+    return "rgba(220,38,38,0.6)";
   };
 
   return (
     <svg viewBox="60 0 300 490" style={{ width: "100%", maxWidth: 340, margin: "0 auto", display: "block" }}>
-      {/* Car body outline */}
       <path d="M130,15 C160,5 260,5 290,15 L325,35 C340,60 340,80 335,110 L335,430 C335,455 320,475 290,480 L240,488 C225,490 195,490 180,488 L130,480 C100,475 85,455 85,430 L85,110 C80,80 80,60 95,35 Z"
-        fill="none" stroke="#3a4555" strokeWidth="3.5" />
-      {/* Windshield */}
-      <path d="M155,125 L265,125 L272,140 L272,150 L148,150 L148,140 Z" fill="rgba(140,170,200,0.25)" stroke="#4a5568" strokeWidth="1" />
-      {/* Rear window */}
-      <path d="M155,375 L265,375 L268,390 L152,390 Z" fill="rgba(140,170,200,0.25)" stroke="#4a5568" strokeWidth="1" />
-
+        fill="none" stroke="#cbd5e1" strokeWidth="3.5" />
+      <path d="M155,125 L265,125 L272,140 L272,150 L148,150 L148,140 Z" fill="rgba(219,234,254,0.6)" stroke="#bfdbfe" strokeWidth="1" />
+      <path d="M155,375 L265,375 L268,390 L152,390 Z" fill="rgba(219,234,254,0.6)" stroke="#bfdbfe" strokeWidth="1" />
       {Object.entries(panelPaths).map(([key, { d, cx, cy }]) => {
         const isSelected = selectedPanel === key;
         const hasData = panelData[key] && (panelData[key].count > 0 || panelData[key].rrEnabled || panelData[key].convEnabled);
@@ -300,22 +517,25 @@ function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
           <g key={key} onClick={() => onSelectPanel(key)} style={{ cursor: "pointer" }}>
             <path d={d}
               fill={getColor(key)}
-              stroke={isSelected ? "#f59e0b" : hasData ? "#64748b" : "#94a3b8"}
+              stroke={isSelected ? "#2563eb" : hasData ? "#1d4ed8" : "#e2e8f0"}
               strokeWidth={isSelected ? 2.5 : 1}
               style={{ transition: "all 0.2s" }}
             />
             {hasData && (
               <>
                 <circle cx={cx} cy={cy} r={14} fill="rgba(15,23,42,0.85)" />
-                <text x={cx} y={cy + 1} textAnchor="middle" dominantBaseline="central"
-                  fill={panelData[key].rrEnabled ? "#ef4444" : panelData[key].convEnabled ? "#fb923c" : "#f59e0b"} fontSize={panelData[key].rrEnabled ? "8" : panelData[key].convEnabled ? "7" : "11"} fontWeight="700" fontFamily="monospace">
+                <text x={cx} y={cy+1} textAnchor="middle" dominantBaseline="central"
+                  fill={panelData[key].rrEnabled ? "#ef4444" : panelData[key].convEnabled ? "#f97316" : "#ffffff"}
+                  fontSize={panelData[key].rrEnabled ? "8" : panelData[key].convEnabled ? "7" : "11"}
+                  fontWeight="700" fontFamily="monospace">
                   {panelData[key].rrEnabled ? "R&R" : panelData[key].convEnabled ? "CONV" : panelData[key].count}
                 </text>
               </>
             )}
             {!hasData && (
               <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central"
-                fill="#64748b" fontSize="8" fontWeight="500" fontFamily="sans-serif" style={{pointerEvents:"none"}}>
+                fill="rgba(148,163,184,0.6)" fontSize="8" fontWeight="500" fontFamily="sans-serif"
+                style={{ pointerEvents: "none" }}>
                 {key}
               </text>
             )}
@@ -340,7 +560,6 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete }) {
   const [riEnabled, setRiEnabled] = useState(data?.riEnabled || false);
   const [laborRate, setLaborRate] = useState(data?.laborRate ?? DEFAULT_LABOR_RATE);
 
-  // Initialize R&I operation times from saved data or defaults
   const defaultOps = (RI_OPERATIONS[panel] || []);
   const initTimes = () => {
     const saved = data?.riTimes || {};
@@ -355,7 +574,6 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete }) {
     defaultOps.forEach(op => { inc[op.id] = false; });
     return inc;
   });
-  // Per-operation R&R toggle (for ops with rrOption flag)
   const [riRr, setRiRr] = useState(() => {
     if (data?.riRr) return data.riRr;
     const rr = {};
@@ -366,32 +584,22 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete }) {
   const updateRiTime = (id, delta) => {
     setRiTimes(prev => ({ ...prev, [id]: Math.max(0, parseFloat((prev[id] + delta).toFixed(1))) }));
   };
-  const toggleRiOp = (id) => {
-    setRiIncluded(prev => ({ ...prev, [id]: !prev[id] }));
-  };
-  const toggleRiRr = (id) => {
-    setRiRr(prev => ({ ...prev, [id]: !prev[id] }));
-  };
+  const toggleRiOp = (id) => setRiIncluded(prev => ({ ...prev, [id]: !prev[id] }));
+  const toggleRiRr = (id) => setRiRr(prev => ({ ...prev, [id]: !prev[id] }));
 
-  // R&I total calculation
   const riTotalHours = riEnabled ? defaultOps.reduce((s, op) => s + (riIncluded[op.id] ? (riTimes[op.id] || 0) : 0), 0) : 0;
   const riTotalCost = Math.round(riTotalHours * laborRate * 100) / 100;
 
   const rows = PRICING_MATRIX[panel] || [];
-  // Filter ranges that have pricing > 0 for at least one size
   const availableRanges = rows.filter(r => r.DIME > 0 || r.NICKEL > 0 || r.QUARTER > 0 || r.HALF > 0);
   const selectedRangeIdx = selectedRange ? availableRanges.findIndex(r => r.range === selectedRange) : -1;
 
-  const toggleAddon = (name) => {
-    setAddons(prev => prev.includes(name) ? [] : [name]);
-  };
+  const toggleAddon = (name) => setAddons(prev => prev.includes(name) ? [] : [name]);
 
-  // Get the selected row from the matrix
   const selectedRow = selectedRange ? rows.find(r => r.range === selectedRange) : null;
   const basePrice = selectedRow ? (selectedRow[size] || 0) : 0;
-  const count = selectedRow ? selectedRow.max : 0; // use max of range for heat map display
+  const count = selectedRow ? selectedRow.max : 0;
 
-  // Available sizes for the selected range (price > 0)
   const availableSizes = DENT_SIZES.filter(s => {
     if (selectedRow) return selectedRow[s] > 0;
     return rows.some(r => r[s] > 0);
@@ -414,22 +622,24 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete }) {
   const pdrTotal = nonPdr ? 0 : (basePrice + addonTotal);
   const totalPrice = pdrTotal + rrCost + convCost + riTotalCost;
 
+  const S = styles;
+
   return (
-    <div style={styles.modalOverlay} onClick={onClose}>
-      <div style={styles.modalContent} onClick={e => e.stopPropagation()}>
-        <div style={styles.modalHeader}>
+    <div style={S.modalOverlay} onClick={onClose}>
+      <div style={S.modalContent} onClick={e => e.stopPropagation()}>
+        <div style={S.modalHeader}>
           <div>
-            <div style={styles.modalTitle}>{PANEL_LABELS[panel]}</div>
-            <div style={styles.modalSubtitle}>{panel} • {availableRanges.length} damage ranges</div>
+            <div style={S.modalTitle}>{PANEL_LABELS[panel]}</div>
+            <div style={S.modalSubtitle}>{panel} • {availableRanges.length} damage ranges</div>
           </div>
-          <button onClick={onClose} style={styles.closeBtn}>✕</button>
+          <button onClick={onClose} style={S.closeBtn}>✕</button>
         </div>
 
-        <div style={styles.modalBody}>
+        <div style={S.modalBody}>
           {/* Repair Mode Toggles */}
-          <div style={styles.repairToggles}>
+          <div style={S.repairToggles}>
             <button onClick={() => { setRrEnabled(v => !v); if (!rrEnabled) setConvEnabled(false); }}
-              style={{ ...styles.repairToggleBtn, ...(rrEnabled ? styles.repairToggleBtnRR : {}) }}>
+              style={{ ...S.repairToggleBtn, ...(rrEnabled ? S.repairToggleBtnRR : {}) }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                 <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/>
                 <polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/>
@@ -437,7 +647,7 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete }) {
               <span>R&R</span>
             </button>
             <button onClick={() => { setConvEnabled(v => !v); if (!convEnabled) setRrEnabled(false); }}
-              style={{ ...styles.repairToggleBtn, ...(convEnabled ? styles.repairToggleBtnConv : {}) }}>
+              style={{ ...S.repairToggleBtn, ...(convEnabled ? S.repairToggleBtnConv : {}) }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                 <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/>
               </svg>
@@ -445,367 +655,284 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete }) {
             </button>
           </div>
 
-          {/* PDR Sections — hidden when R&R or Conventional is enabled */}
           {!nonPdr && (
             <>
-          {/* Dent Count Range Selector */}
-          <label style={styles.fieldLabel}>DENT COUNT RANGE</label>
-          <div style={styles.rangeNavRow}>
-            <button
-              style={{ ...styles.rangeArrow, opacity: selectedRangeIdx > 0 ? 1 : 0.25 }}
-              onClick={() => {
-                if (selectedRangeIdx > 0) setSelectedRange(availableRanges[selectedRangeIdx - 1].range);
-              }}
-              disabled={selectedRangeIdx <= 0}
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
-            </button>
-            <div style={{
-              ...styles.rangeDisplay,
-              ...(selectedRow && selectedRow[size] === 0 ? styles.rangeDisplayInvalid : {}),
-            }}>
-              {selectedRange ? (
-                <>
-                  <div style={{
-                    ...styles.rangeDisplayCount,
-                    ...(selectedRow && selectedRow[size] === 0 ? { color: "#ef4444" } : {}),
-                  }}>{selectedRange}</div>
-                  <div style={{
-                    ...styles.rangeDisplayLabel,
-                    ...(selectedRow && selectedRow[size] === 0 ? { color: "#b91c1c" } : {}),
-                  }}>dents</div>
-                </>
-              ) : (
-                <div style={styles.rangeDisplayPlaceholder}>Select range</div>
+              <label style={S.fieldLabel}>DENT COUNT RANGE</label>
+              <div style={S.rangeNavRow}>
+                <button style={{ ...S.rangeArrow, opacity: selectedRangeIdx > 0 ? 1 : 0.25 }}
+                  onClick={() => { if (selectedRangeIdx > 0) setSelectedRange(availableRanges[selectedRangeIdx - 1].range); }}
+                  disabled={selectedRangeIdx <= 0}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+                </button>
+                <div style={{ ...S.rangeDisplay, ...(selectedRow && selectedRow[size] === 0 ? S.rangeDisplayInvalid : {}) }}>
+                  {selectedRange ? (
+                    <>
+                      <div style={{ ...S.rangeDisplayCount, ...(selectedRow && selectedRow[size] === 0 ? { color: "#ef4444" } : {}) }}>{selectedRange}</div>
+                      <div style={{ ...S.rangeDisplayLabel, ...(selectedRow && selectedRow[size] === 0 ? { color: "#b91c1c" } : {}) }}>dents</div>
+                    </>
+                  ) : (
+                    <div style={S.rangeDisplayPlaceholder}>Select range</div>
+                  )}
+                </div>
+                <button style={{ ...S.rangeArrow, opacity: selectedRangeIdx < availableRanges.length - 1 ? 1 : 0.25 }}
+                  onClick={() => { if (selectedRangeIdx < availableRanges.length - 1) setSelectedRange(availableRanges[selectedRangeIdx + 1].range); }}
+                  disabled={selectedRangeIdx >= availableRanges.length - 1}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+                </button>
+              </div>
+              <div style={S.rangeSteps}>
+                {availableRanges.map((r, i) => {
+                  const isActive = selectedRange === r.range;
+                  const isPast = i < selectedRangeIdx;
+                  const isInvalid = r[size] === 0;
+                  return (
+                    <button key={r.range} onClick={() => setSelectedRange(r.range)}
+                      style={{ ...S.rangeStep, ...(isActive ? S.rangeStepActive : {}), ...(isPast && !isInvalid ? S.rangeStepPast : {}) }}>
+                      <div style={{
+                        ...S.rangeStepDot,
+                        ...(isActive && !isInvalid ? { background: "#2563eb", borderColor: "#2563eb", boxShadow: "0 0 8px rgba(37,99,235,0.5)", transform: "scale(1.3)" } : {}),
+                        ...(isActive && isInvalid ? { background: "#ef4444", borderColor: "#ef4444", boxShadow: "0 0 8px rgba(239,68,68,0.5)", transform: "scale(1.3)" } : {}),
+                        ...(isPast && !isInvalid ? { background: "rgba(37,99,235,0.4)", borderColor: "rgba(37,99,235,0.5)" } : {}),
+                        ...(isInvalid && !isActive ? { background: "rgba(239,68,68,0.3)", borderColor: "rgba(239,68,68,0.4)" } : {}),
+                      }} />
+                      {i < availableRanges.length - 1 && (
+                        <div style={{ position: "absolute", top: 9, left: "55%", right: "-45%", height: 2,
+                          background: isPast ? "rgba(37,99,235,0.35)" : "rgba(148,163,184,0.15)", zIndex: 0 }} />
+                      )}
+                      <div style={{ ...S.rangeStepText,
+                        ...(isActive && !isInvalid ? { color: "#3b82f6" } : {}),
+                        ...(isActive && isInvalid ? { color: "#ef4444" } : {}),
+                        ...(isInvalid && !isActive ? { color: "#ef4444", opacity: 0.6 } : {}),
+                      }}>{r.range}</div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <label style={{ ...S.fieldLabel, marginTop: 22 }}>DENT SIZE</label>
+              <div style={S.sizeGrid}>
+                {DENT_SIZES.map(s => {
+                  const hasAnyPrice = rows.some(r => r[s] > 0);
+                  const isAvailable = selectedRow ? selectedRow[s] > 0 : hasAnyPrice;
+                  const priceForSize = selectedRow ? selectedRow[s] : 0;
+                  const isSelectedInvalid = size === s && selectedRow && selectedRow[s] === 0;
+                  return (
+                    <button key={s} onClick={() => hasAnyPrice && setSize(s)}
+                      style={{
+                        ...S.sizeBtn,
+                        ...(size === s && isAvailable ? S.sizeBtnActive : {}),
+                        ...(isSelectedInvalid ? S.sizeBtnRed : {}),
+                        ...(!hasAnyPrice ? S.sizeBtnDisabled : {}),
+                        ...(!isAvailable && hasAnyPrice && size !== s ? S.sizeBtnWarn : {}),
+                      }}>
+                      <div>{DENT_SIZE_LABELS[s]}</div>
+                      {selectedRow && isAvailable && <div style={{ fontSize: 11, marginTop: 2, opacity: 0.7 }}>${priceForSize}</div>}
+                      {selectedRow && !isAvailable && <div style={{ fontSize: 9, marginTop: 2, color: "#ef4444", fontWeight: 600 }}>R&R</div>}
+                      {!selectedRow && !hasAnyPrice && <div style={{ fontSize: 10, marginTop: 2, opacity: 0.5 }}>N/A</div>}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {selectedRange && basePrice === 0 && selectedRow && (
+                <div style={S.rrWarning}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                    <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                  </svg>
+                  <div>
+                    <div style={S.rrWarningTitle}>Conventional or R&R Recommended</div>
+                    <div style={S.rrWarningText}>Exceeds PDR matrix for this panel at this size.</div>
+                  </div>
+                </div>
               )}
-            </div>
-            <button
-              style={{ ...styles.rangeArrow, opacity: selectedRangeIdx < availableRanges.length - 1 ? 1 : 0.25 }}
-              onClick={() => {
-                if (selectedRangeIdx < availableRanges.length - 1) setSelectedRange(availableRanges[selectedRangeIdx + 1].range);
-              }}
-              disabled={selectedRangeIdx >= availableRanges.length - 1}
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 18 15 12 9 6"/></svg>
-            </button>
-          </div>
-          {/* Range step indicator */}
-          <div style={styles.rangeSteps}>
-            {availableRanges.map((r, i) => {
-              const isActive = selectedRange === r.range;
-              const isPast = i < selectedRangeIdx;
-              const isInvalid = r[size] === 0;
-              return (
-                <button key={r.range} onClick={() => setSelectedRange(r.range)}
-                  style={{
-                    ...styles.rangeStep,
-                    ...(isActive ? styles.rangeStepActive : {}),
-                    ...(isPast && !isInvalid ? styles.rangeStepPast : {}),
-                  }}>
-                  <div style={{
-                    ...styles.rangeStepDot,
-                    ...(isActive && !isInvalid ? { background: "#f59e0b", borderColor: "#f59e0b", boxShadow: "0 0 8px rgba(245,158,11,0.5)", transform: "scale(1.3)" } : {}),
-                    ...(isActive && isInvalid ? { background: "#ef4444", borderColor: "#ef4444", boxShadow: "0 0 8px rgba(239,68,68,0.5)", transform: "scale(1.3)" } : {}),
-                    ...(isPast && !isInvalid ? { background: "rgba(245,158,11,0.4)", borderColor: "rgba(245,158,11,0.5)" } : {}),
-                    ...(isInvalid && !isActive ? { background: "rgba(239,68,68,0.3)", borderColor: "rgba(239,68,68,0.4)" } : {}),
-                  }} />
-                  {/* Connector line */}
-                  {i < availableRanges.length - 1 && (
-                    <div style={{
-                      position: "absolute", top: 9, left: "55%", right: "-45%", height: 2,
-                      background: isPast ? "rgba(245,158,11,0.35)" : "rgba(148,163,184,0.15)",
-                      zIndex: 0,
-                    }} />
-                  )}
-                  <div style={{
-                    ...styles.rangeStepText,
-                    ...(isActive && !isInvalid ? { color: "#f59e0b" } : {}),
-                    ...(isActive && isInvalid ? { color: "#ef4444" } : {}),
-                    ...(isInvalid && !isActive ? { color: "#ef4444", opacity: 0.6 } : {}),
-                  }}>{r.range}</div>
-                </button>
-              );
-            })}
-          </div>
 
-          {/* Dent Size */}
-          <label style={{ ...styles.fieldLabel, marginTop: 22 }}>DENT SIZE</label>
-          <div style={styles.sizeGrid}>
-            {DENT_SIZES.map(s => {
-              const hasAnyPrice = rows.some(r => r[s] > 0);
-              const isAvailable = selectedRow ? selectedRow[s] > 0 : hasAnyPrice;
-              const priceForSize = selectedRow ? selectedRow[s] : 0;
-              const isSelectedInvalid = size === s && selectedRow && selectedRow[s] === 0;
-              return (
-                <button key={s} onClick={() => hasAnyPrice && setSize(s)}
-                  style={{
-                    ...styles.sizeBtn,
-                    ...(size === s && isAvailable ? styles.sizeBtnActive : {}),
-                    ...(isSelectedInvalid ? styles.sizeBtnRed : {}),
-                    ...(!hasAnyPrice ? styles.sizeBtnDisabled : {}),
-                    ...(!isAvailable && hasAnyPrice && size !== s ? styles.sizeBtnWarn : {}),
-                  }}>
-                  <div>{DENT_SIZE_LABELS[s]}</div>
-                  {selectedRow && isAvailable && (
-                    <div style={{ fontSize: 11, marginTop: 2, opacity: 0.7 }}>${priceForSize}</div>
-                  )}
-                  {selectedRow && !isAvailable && (
-                    <div style={{ fontSize: 9, marginTop: 2, color: "#ef4444", fontWeight: 600 }}>R&R</div>
-                  )}
-                  {!selectedRow && !hasAnyPrice && <div style={{ fontSize: 10, marginTop: 2, opacity: 0.5 }}>N/A</div>}
-                </button>
-              );
-            })}
-          </div>
+              {selectedRange && basePrice > 0 && <div style={S.priceTag}>Base: ${basePrice.toLocaleString()}</div>}
 
-          {/* Conventional / R&R Warning */}
-          {selectedRange && basePrice === 0 && selectedRow && (
-            <div style={styles.rrWarning}>
-              <div style={styles.rrWarningIcon}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round">
-                  <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                  <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-                </svg>
-              </div>
-              <div>
-                <div style={styles.rrWarningTitle}>Conventional or R&R Recommended</div>
-                <div style={styles.rrWarningText}>
-                  The {DENT_SIZE_LABELS[size].toLowerCase()}-size dent at {selectedRange} count exceeds the PDR matrix for this panel. Conventional repair or Remove & Replace is recommended.
-                </div>
-              </div>
-            </div>
-          )}
-
-          {selectedRange && basePrice > 0 && (
-            <div style={styles.priceTag}>Base: ${basePrice.toLocaleString()}</div>
-          )}
-
-          {/* Addons */}
-          <label style={styles.fieldLabel}>ADD-ONS</label>
-          <div style={styles.addonGrid}>
-            {ADDONS.map(a => {
-              const isActive = addons.includes(a.name);
-              const isDollarQty = a.name === "Oversized Dent" || a.name === "Double OS Dents";
-              const showStepper = isDollarQty && isActive;
-              return (
-                <div key={a.name} style={{ marginBottom: 6 }}>
-                  <button onClick={() => toggleAddon(a.name)}
-                    style={{ ...styles.addonBtn, ...(isActive ? styles.addonBtnActive : {}) }}>
-                    <span style={styles.addonName}>{a.name}</span>
-                    <span style={{ ...styles.addonVal, ...(isActive ? styles.addonValActive : {}) }}>
-                      {a.type === "dollar" ? `$${a.value}/ea` : `+${(a.value * 100)}%`}
-                    </span>
-                  </button>
-                  {showStepper && (
-                    <div style={styles.osDentRow}>
-                      <span style={styles.osDentLabel}>{a.name === "Oversized Dent" ? "OS Dents" : "Dbl OS"} Qty:</span>
-                      <div style={styles.osStepper}>
-                        <button style={styles.osStepBtn} onClick={(e) => {
-                          e.stopPropagation();
-                          if (a.name === "Oversized Dent") setOsDentCount(c => Math.max(0, c - 1));
-                          else setDoubleOsCount(c => Math.max(0, c - 1));
-                        }}>
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                        </button>
-                        <div style={styles.osStepValue}>
-                          {a.name === "Oversized Dent" ? osDentCount : doubleOsCount}
+              <label style={S.fieldLabel}>ADD-ONS</label>
+              <div style={S.addonGrid}>
+                {ADDONS.map(a => {
+                  const isActive = addons.includes(a.name);
+                  const isDollarQty = a.name === "Oversized Dent" || a.name === "Double OS Dents";
+                  const showStepper = isDollarQty && isActive;
+                  return (
+                    <div key={a.name} style={{ marginBottom: 6 }}>
+                      <button onClick={() => toggleAddon(a.name)}
+                        style={{ ...S.addonBtn, ...(isActive ? S.addonBtnActive : {}) }}>
+                        <span style={S.addonName}>{a.name}</span>
+                        <span style={{ ...S.addonVal, ...(isActive ? S.addonValActive : {}) }}>
+                          {a.type === "dollar" ? `$${a.value}/ea` : `+${(a.value * 100)}%`}
+                        </span>
+                      </button>
+                      {showStepper && (
+                        <div style={S.osDentRow}>
+                          <span style={S.osDentLabel}>{a.name === "Oversized Dent" ? "OS Dents" : "Dbl OS"} Qty:</span>
+                          <div style={S.osStepper}>
+                            <button style={S.osStepBtn} onClick={e => { e.stopPropagation(); if (a.name === "Oversized Dent") setOsDentCount(c => Math.max(0, c-1)); else setDoubleOsCount(c => Math.max(0, c-1)); }}>
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            </button>
+                            <div style={S.osStepValue}>{a.name === "Oversized Dent" ? osDentCount : doubleOsCount}</div>
+                            <button style={S.osStepBtn} onClick={e => { e.stopPropagation(); if (a.name === "Oversized Dent") setOsDentCount(c => c+1); else setDoubleOsCount(c => c+1); }}>
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            </button>
+                          </div>
+                          <span style={S.osStepTotal}>${((a.name === "Oversized Dent" ? osDentCount : doubleOsCount) * a.value).toLocaleString()}</span>
                         </div>
-                        <button style={styles.osStepBtn} onClick={(e) => {
-                          e.stopPropagation();
-                          if (a.name === "Oversized Dent") setOsDentCount(c => c + 1);
-                          else setDoubleOsCount(c => c + 1);
-                        }}>
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                        </button>
-                      </div>
-                      <span style={styles.osStepTotal}>
-                        ${((a.name === "Oversized Dent" ? osDentCount : doubleOsCount) * a.value).toLocaleString()}
-                      </span>
+                      )}
                     </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                  );
+                })}
+              </div>
             </>
           )}
 
-          {/* R&R — labor hours */}
+          {/* R&R panel */}
           {rrEnabled && (
-            <div style={styles.rrPanel}>
-              <div style={styles.rrPanelHeader}>
+            <div style={S.rrPanel}>
+              <div style={S.rrPanelHeader}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round">
                   <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/>
                   <polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/>
                 </svg>
-                <div>
-                  <div style={styles.rrPanelTitle}>Remove & Replace</div>
-                  <div style={styles.rrPanelSub}>Full panel replacement — set labor hours</div>
-                </div>
+                <div><div style={S.rrPanelTitle}>Remove & Replace</div><div style={S.rrPanelSub}>Full panel replacement</div></div>
               </div>
-              <div style={styles.rrRow}>
-                <span style={styles.rrRowLabel}>Labor Rate</span>
-                <div style={styles.osStepper}>
-                  <button style={styles.osStepBtn} onClick={() => setLaborRate(r => Math.max(0, parseFloat((r - 1).toFixed(2))))}>
+              <div style={S.rrRow}>
+                <span style={S.rrRowLabel}>Labor Rate</span>
+                <div style={S.osStepper}>
+                  <button style={S.osStepBtn} onClick={() => setLaborRate(r => Math.max(0, parseFloat((r-1).toFixed(2))))}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </button>
-                  <div style={styles.rrRateValue}>${laborRate.toFixed(2)}</div>
-                  <button style={styles.osStepBtn} onClick={() => setLaborRate(r => parseFloat((r + 1).toFixed(2)))}>
+                  <div style={S.rrRateValue}>${laborRate.toFixed(2)}</div>
+                  <button style={S.osStepBtn} onClick={() => setLaborRate(r => parseFloat((r+1).toFixed(2)))}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </button>
                 </div>
-                <span style={styles.rrUnit}>/hr</span>
+                <span style={S.rrUnit}>/hr</span>
               </div>
-              <div style={styles.rrRow}>
-                <span style={styles.rrRowLabel}>Labor Hours</span>
-                <div style={styles.osStepper}>
-                  <button style={styles.osStepBtn} onClick={() => setRrHours(h => Math.max(0, parseFloat((h - 1).toFixed(1))))}>
+              <div style={S.rrRow}>
+                <span style={S.rrRowLabel}>Labor Hours</span>
+                <div style={S.osStepper}>
+                  <button style={S.osStepBtn} onClick={() => setRrHours(h => Math.max(0, parseFloat((h-1).toFixed(1))))}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </button>
-                  <div style={styles.rrHoursValue}>{rrHours.toFixed(1)}</div>
-                  <button style={styles.osStepBtn} onClick={() => setRrHours(h => parseFloat((h + 1).toFixed(1)))}>
+                  <div style={S.rrHoursValue}>{rrHours.toFixed(1)}</div>
+                  <button style={S.osStepBtn} onClick={() => setRrHours(h => parseFloat((h+1).toFixed(1)))}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </button>
                 </div>
-                <span style={styles.rrUnit}>hrs</span>
+                <span style={S.rrUnit}>hrs</span>
               </div>
-              {rrCost > 0 && (
-                <div style={styles.rrSubtotal}>
-                  <span>R&R Total ({rrHours.toFixed(1)} hrs × ${laborRate.toFixed(2)})</span>
-                  <span style={styles.rrSubtotalVal}>${rrCost.toFixed(2)}</span>
-                </div>
-              )}
+              {rrCost > 0 && <div style={S.rrSubtotal}><span>R&R Total ({rrHours.toFixed(1)} hrs × ${laborRate.toFixed(2)})</span><span style={S.rrSubtotalVal}>${rrCost.toFixed(2)}</span></div>}
             </div>
           )}
 
-          {/* Conventional Repair — labor hours */}
+          {/* Conventional panel */}
           {convEnabled && (
-            <div style={{ ...styles.rrPanel, background: "rgba(251,146,60,0.05)", borderColor: "rgba(251,146,60,0.15)" }}>
-              <div style={{ ...styles.rrPanelHeader, borderColor: "rgba(251,146,60,0.1)" }}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fb923c" strokeWidth="2" strokeLinecap="round">
+            <div style={{ ...S.rrPanel, background: "rgba(249,115,22,0.05)", borderColor: "rgba(249,115,22,0.15)" }}>
+              <div style={{ ...S.rrPanelHeader, borderColor: "rgba(249,115,22,0.1)" }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#f97316" strokeWidth="2" strokeLinecap="round">
                   <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/>
                 </svg>
-                <div>
-                  <div style={{ ...styles.rrPanelTitle, color: "#fb923c" }}>Conventional Repair</div>
-                  <div style={styles.rrPanelSub}>Body work repair — set labor hours</div>
-                </div>
+                <div><div style={{ ...S.rrPanelTitle, color: "#f97316" }}>Conventional Repair</div><div style={S.rrPanelSub}>Body work repair</div></div>
               </div>
-              <div style={styles.rrRow}>
-                <span style={styles.rrRowLabel}>Labor Rate</span>
-                <div style={styles.osStepper}>
-                  <button style={styles.osStepBtn} onClick={() => setLaborRate(r => Math.max(0, parseFloat((r - 1).toFixed(2))))}>
+              <div style={S.rrRow}>
+                <span style={S.rrRowLabel}>Labor Rate</span>
+                <div style={S.osStepper}>
+                  <button style={S.osStepBtn} onClick={() => setLaborRate(r => Math.max(0, parseFloat((r-1).toFixed(2))))}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </button>
-                  <div style={{ ...styles.rrRateValue, color: "#fb923c" }}>${laborRate.toFixed(2)}</div>
-                  <button style={styles.osStepBtn} onClick={() => setLaborRate(r => parseFloat((r + 1).toFixed(2)))}>
+                  <div style={{ ...S.rrRateValue, color: "#f97316" }}>${laborRate.toFixed(2)}</div>
+                  <button style={S.osStepBtn} onClick={() => setLaborRate(r => parseFloat((r+1).toFixed(2)))}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </button>
                 </div>
-                <span style={styles.rrUnit}>/hr</span>
+                <span style={S.rrUnit}>/hr</span>
               </div>
-              <div style={styles.rrRow}>
-                <span style={styles.rrRowLabel}>Labor Hours</span>
-                <div style={styles.osStepper}>
-                  <button style={styles.osStepBtn} onClick={() => setConvHours(h => Math.max(0, parseFloat((h - 1).toFixed(1))))}>
+              <div style={S.rrRow}>
+                <span style={S.rrRowLabel}>Labor Hours</span>
+                <div style={S.osStepper}>
+                  <button style={S.osStepBtn} onClick={() => setConvHours(h => Math.max(0, parseFloat((h-1).toFixed(1))))}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </button>
-                  <div style={styles.rrHoursValue}>{convHours.toFixed(1)}</div>
-                  <button style={styles.osStepBtn} onClick={() => setConvHours(h => parseFloat((h + 1).toFixed(1)))}>
+                  <div style={S.rrHoursValue}>{convHours.toFixed(1)}</div>
+                  <button style={S.osStepBtn} onClick={() => setConvHours(h => parseFloat((h+1).toFixed(1)))}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </button>
                 </div>
-                <span style={styles.rrUnit}>hrs</span>
+                <span style={S.rrUnit}>hrs</span>
               </div>
-              {convCost > 0 && (
-                <div style={{ ...styles.rrSubtotal, borderColor: "rgba(251,146,60,0.12)" }}>
-                  <span>Conv. Total ({convHours.toFixed(1)} hrs × ${laborRate.toFixed(2)})</span>
-                  <span style={{ ...styles.rrSubtotalVal, color: "#fb923c" }}>${convCost.toFixed(2)}</span>
-                </div>
-              )}
+              {convCost > 0 && <div style={{ ...S.rrSubtotal, borderColor: "rgba(249,115,22,0.12)" }}><span>Conv. Total ({convHours.toFixed(1)} hrs × ${laborRate.toFixed(2)})</span><span style={{ ...S.rrSubtotalVal, color: "#f97316" }}>${convCost.toFixed(2)}</span></div>}
             </div>
           )}
 
           {/* R&I Operations */}
           {defaultOps.length > 0 && (
             <>
-              <label style={styles.fieldLabel}>R&I OPERATIONS</label>
-              {/* R&I toggle */}
+              <label style={S.fieldLabel}>R&I OPERATIONS</label>
               <button onClick={() => setRiEnabled(v => !v)}
-                style={{ ...styles.addonBtn, ...(riEnabled ? styles.riToggleActive : {}), marginBottom: 10 }}>
-                <span style={styles.addonName}>R&I — Remove & Install</span>
-                <span style={{ ...styles.addonVal, ...(riEnabled ? styles.addonValActive : {}) }}>
-                  {riEnabled ? "ON" : "OFF"}
-                </span>
+                style={{ ...S.addonBtn, ...(riEnabled ? S.riToggleActive : {}), marginBottom: 10 }}>
+                <span style={S.addonName}>R&I — Remove & Install</span>
+                <span style={{ ...S.addonVal, ...(riEnabled ? S.addonValActive : {}) }}>{riEnabled ? "ON" : "OFF"}</span>
               </button>
-
               {riEnabled && (
-                <div style={styles.riSection}>
-                  {/* Labor Rate */}
-                  <div style={styles.riLaborRow}>
-                    <span style={styles.riLaborLabel}>Labor Rate</span>
-                    <div style={styles.osStepper}>
-                      <button style={styles.osStepBtn} onClick={() => setLaborRate(r => Math.max(0, parseFloat((r - 0.1).toFixed(2))))}>
+                <div style={S.riSection}>
+                  <div style={S.riLaborRow}>
+                    <span style={S.riLaborLabel}>Labor Rate</span>
+                    <div style={S.osStepper}>
+                      <button style={S.osStepBtn} onClick={() => setLaborRate(r => Math.max(0, parseFloat((r-0.1).toFixed(2))))}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
                       </button>
-                      <div style={styles.riLaborValue}>${laborRate.toFixed(2)}</div>
-                      <button style={styles.osStepBtn} onClick={() => setLaborRate(r => parseFloat((r + 0.1).toFixed(2)))}>
+                      <div style={S.riLaborValue}>${laborRate.toFixed(2)}</div>
+                      <button style={S.osStepBtn} onClick={() => setLaborRate(r => parseFloat((r+0.1).toFixed(2)))}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                       </button>
                     </div>
-                    <span style={styles.riLaborUnit}>/hr</span>
+                    <span style={S.riLaborUnit}>/hr</span>
                   </div>
-
-                  {/* Operation list */}
-                  <div style={styles.riOpList}>
+                  <div style={S.riOpList}>
                     {defaultOps.map(op => {
                       const included = riIncluded[op.id] !== false;
                       const isRr = riRr[op.id] || false;
                       const time = riTimes[op.id] ?? op.time;
                       return (
-                        <div key={op.id} style={styles.riOpCard}>
-                          {/* Top row: full tappable include/exclude + R&R toggle */}
-                          <div style={styles.riOpTopRow}>
+                        <div key={op.id} style={S.riOpCard}>
+                          <div style={S.riOpTopRow}>
                             <button onClick={() => toggleRiOp(op.id)}
-                              style={{ ...styles.riOpToggleBtn, ...(included ? (isRr ? styles.riOpToggleBtnRr : styles.riOpToggleBtnOn) : {}) }}>
-                              <div style={{ ...styles.riOpCheck, ...(included ? (isRr ? styles.riOpCheckRr : styles.riOpCheckOn) : {}) }}>
+                              style={{ ...S.riOpToggleBtn, ...(included ? (isRr ? S.riOpToggleBtnRr : S.riOpToggleBtnOn) : {}) }}>
+                              <div style={{ ...S.riOpCheck, ...(included ? (isRr ? S.riOpCheckRr : S.riOpCheckOn) : {}) }}>
                                 {included && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>}
                               </div>
-                              <span style={{ ...styles.riOpLabel, ...(included ? {} : styles.riOpLabelOff) }}>
-                                {op.name}
-                              </span>
-                              {!included && <span style={styles.riOpExcTag}>EXCL</span>}
+                              <span style={{ ...S.riOpLabel, ...(included ? {} : S.riOpLabelOff) }}>{op.name}</span>
+                              {!included && <span style={S.riOpExcTag}>EXCL</span>}
                             </button>
                             {op.rrOption && included && (
                               <button onClick={() => toggleRiRr(op.id)}
-                                style={{ ...styles.riRrBtn, ...(isRr ? styles.riRrBtnActive : {}) }}>
+                                style={{ ...S.riRrBtn, ...(isRr ? S.riRrBtnActive : {}) }}>
                                 {isRr ? "R&R ✓" : "R&R"}
                               </button>
                             )}
                           </div>
-                          {/* Bottom row: time controls when included */}
                           {included && (
-                            <div style={styles.riOpBottomRow}>
-                              <div style={styles.riOpTimeControls}>
-                                <button style={styles.riTimeBtn} onClick={() => updateRiTime(op.id, -0.1)}>
+                            <div style={S.riOpBottomRow}>
+                              <div style={S.riOpTimeControls}>
+                                <button style={S.riTimeBtn} onClick={() => updateRiTime(op.id, -0.1)}>
                                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
                                 </button>
-                                <span style={styles.riTimeVal}>{time.toFixed(1)} hrs</span>
-                                <button style={styles.riTimeBtn} onClick={() => updateRiTime(op.id, 0.1)}>
+                                <span style={S.riTimeVal}>{time.toFixed(1)} hrs</span>
+                                <button style={S.riTimeBtn} onClick={() => updateRiTime(op.id, 0.1)}>
                                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                                 </button>
                               </div>
-                              <span style={{ ...styles.riOpCost, ...(isRr ? { color: "#ef4444" } : {}) }}>${(time * laborRate).toFixed(2)}</span>
+                              <span style={{ ...S.riOpCost, ...(isRr ? { color: "#ef4444" } : {}) }}>${(time * laborRate).toFixed(2)}</span>
                             </div>
                           )}
                         </div>
                       );
                     })}
                   </div>
-
-                  {/* R&I subtotal */}
-                  <div style={styles.riSubtotal}>
+                  <div style={S.riSubtotal}>
                     <span>R&I Total ({riTotalHours.toFixed(1)} hrs × ${laborRate.toFixed(2)})</span>
-                    <span style={styles.riSubtotalVal}>${riTotalCost.toFixed(2)}</span>
+                    <span style={S.riSubtotalVal}>${riTotalCost.toFixed(2)}</span>
                   </div>
                 </div>
               )}
@@ -814,37 +941,32 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete }) {
 
           {/* Summary */}
           {((selectedRange && basePrice > 0 && !nonPdr) || (nonPdr && (rrCost > 0 || convCost > 0 || (riEnabled && riTotalCost > 0)))) && (
-            <div style={styles.summaryBox}>
-              {!nonPdr && (
-                <div style={styles.summaryRow}>
-                  <span>Base ({selectedRange} {DENT_SIZE_LABELS[size].toLowerCase()} dents)</span>
-                  <span>${basePrice.toLocaleString()}</span>
-                </div>
-              )}
+            <div style={S.summaryBox}>
+              {!nonPdr && <div style={S.summaryRow}><span>Base ({selectedRange} {DENT_SIZE_LABELS[size].toLowerCase()} dents)</span><span>${basePrice.toLocaleString()}</span></div>}
               {!nonPdr && addonBreakdown.filter(a => a.amount > 0).map(a => (
-                <div key={a.name} style={styles.summaryRow}><span>{a.name}</span><span>+${a.amount.toLocaleString()}</span></div>
+                <div key={a.name} style={S.summaryRow}><span>{a.name}</span><span>+${a.amount.toLocaleString()}</span></div>
               ))}
-              {rrEnabled && rrCost > 0 && (
-                <div style={styles.summaryRow}><span>R&R ({rrHours.toFixed(1)} hrs)</span><span>${rrCost.toFixed(2)}</span></div>
-              )}
-              {convEnabled && convCost > 0 && (
-                <div style={styles.summaryRow}><span>Conv. ({convHours.toFixed(1)} hrs)</span><span>${convCost.toFixed(2)}</span></div>
-              )}
-              {riEnabled && riTotalCost > 0 && (
-                <div style={styles.summaryRow}><span>R&I ({riTotalHours.toFixed(1)} hrs)</span><span>+${riTotalCost.toFixed(2)}</span></div>
-              )}
-              <div style={styles.summaryTotal}><span>Panel Total</span><span>${totalPrice.toLocaleString()}</span></div>
+              {rrEnabled && rrCost > 0 && <div style={S.summaryRow}><span>R&R ({rrHours.toFixed(1)} hrs)</span><span>${rrCost.toFixed(2)}</span></div>}
+              {convEnabled && convCost > 0 && <div style={S.summaryRow}><span>Conv. ({convHours.toFixed(1)} hrs)</span><span>${convCost.toFixed(2)}</span></div>}
+              {riEnabled && riTotalCost > 0 && <div style={S.summaryRow}><span>R&I ({riTotalHours.toFixed(1)} hrs)</span><span>+${riTotalCost.toFixed(2)}</span></div>}
+              <div style={S.summaryTotal}><span>Panel Total</span><span>${totalPrice.toLocaleString()}</span></div>
             </div>
           )}
         </div>
 
-        <div style={styles.modalFooter}>
+        <div style={S.modalFooter}>
           {data && (data.count > 0 || data.rrEnabled || data.convEnabled) && (
-            <button onClick={() => { onDelete(panel); onClose(); }} style={styles.deleteBtn}>Remove</button>
+            <button onClick={() => { onDelete(panel); onClose(); }} style={S.deleteBtn}>Remove</button>
           )}
-          <button onClick={() => { onSave(panel, { count: nonPdr ? 0 : count, selectedRange: nonPdr ? null : selectedRange, size, addons: nonPdr ? [] : addons, osDentCount, doubleOsCount, rrEnabled, rrHours, rrCost, convEnabled, convHours, convCost, basePrice: nonPdr ? 0 : basePrice, addonTotal: nonPdr ? 0 : addonTotal, riEnabled, laborRate, riTimes, riIncluded, riRr, riTotalHours, riTotalCost, totalPrice }); onClose(); }}
-            style={styles.saveBtn} disabled={!nonPdr && (!selectedRange || basePrice <= 0)}>
-            {rrEnabled ? (totalPrice > 0 ? `Save R&R — $${totalPrice.toLocaleString()}` : "Save R&R") : convEnabled ? (totalPrice > 0 ? `Save Conv. — $${totalPrice.toLocaleString()}` : "Save Conv.") : !selectedRange ? "Select a damage range" : basePrice <= 0 ? "Select a valid size" : `Save — $${totalPrice.toLocaleString()}`}
+          <button
+            onClick={() => { onSave(panel, { count: nonPdr ? 0 : count, selectedRange: nonPdr ? null : selectedRange, size, addons: nonPdr ? [] : addons, osDentCount, doubleOsCount, rrEnabled, rrHours, rrCost, convEnabled, convHours, convCost, basePrice: nonPdr ? 0 : basePrice, addonTotal: nonPdr ? 0 : addonTotal, riEnabled, laborRate, riTimes, riIncluded, riRr, riTotalHours, riTotalCost, totalPrice }); onClose(); }}
+            style={S.saveBtn}
+            disabled={!nonPdr && (!selectedRange || basePrice <= 0)}>
+            {rrEnabled ? (totalPrice > 0 ? `Save R&R — $${totalPrice.toLocaleString()}` : "Save R&R")
+              : convEnabled ? (totalPrice > 0 ? `Save Conv. — $${totalPrice.toLocaleString()}` : "Save Conv.")
+              : !selectedRange ? "Select a damage range"
+              : basePrice <= 0 ? "Select a valid size"
+              : `Save — $${totalPrice.toLocaleString()}`}
           </button>
         </div>
       </div>
@@ -852,29 +974,25 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete }) {
   );
 }
 
-// ─── CAMERA COMPONENT ───────────────────────────────────────────────────────
+// ─── CAMERA ──────────────────────────────────────────────────────────────────
 function CameraCapture({ photos, setPhotos }) {
   const inputRef = useRef(null);
   const handleCapture = (e) => {
     const files = Array.from(e.target.files);
     files.forEach(file => {
       const reader = new FileReader();
-      reader.onload = (ev) => {
-        setPhotos(prev => [...prev, { url: ev.target.result, name: file.name, date: new Date().toLocaleString() }]);
-      };
+      reader.onload = (ev) => setPhotos(prev => [...prev, { url: ev.target.result, name: file.name, date: new Date().toLocaleString() }]);
       reader.readAsDataURL(file);
     });
     e.target.value = "";
   };
-
   return (
     <div>
-      <input ref={inputRef} type="file" accept="image/*" capture="environment" multiple
-        onChange={handleCapture} style={{ display: "none" }} />
+      <input ref={inputRef} type="file" accept="image/*" capture="environment" multiple onChange={handleCapture} style={{ display: "none" }} />
       <button onClick={() => inputRef.current.click()} style={styles.cameraBtn}>
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-          <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
-          <circle cx="12" cy="13" r="4" />
+          <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/>
+          <circle cx="12" cy="13" r="4"/>
         </svg>
         <span>Capture Photo</span>
       </button>
@@ -892,216 +1010,115 @@ function CameraCapture({ photos, setPhotos }) {
   );
 }
 
-// ─── REPORT / EXPORT ────────────────────────────────────────────────────────
+// ─── REPORT HTML ─────────────────────────────────────────────────────────────
 function generateReportHTML(vehicleInfo, panelData, photos, grandTotal) {
   const date = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
   const panels = Object.entries(panelData).filter(([, d]) => d.count > 0 || d.rrEnabled || d.convEnabled);
-
-  let lineNum = 0;
-  let totalPrice = 0;
-  let totalLabor = 0;
-
+  let lineNum = 0, totalPrice = 0, totalLabor = 0;
   const allRows = panels.map(([key, d]) => {
     const np = d.rrEnabled || d.convEnabled;
     const rate = d.laborRate || DEFAULT_LABOR_RATE;
-    let rows = "";
-
-    // Panel header row (section divider)
-    rows += `<tr class="${np && d.rrEnabled ? "section-row-rr" : "section-row"}"><td colspan="5">${PANEL_LABELS[key]}${d.rrEnabled ? " — R&R" : d.convEnabled ? " — Conv." : ""}</td></tr>`;
-
+    let rows = `<tr class="${np && d.rrEnabled ? "section-row-rr" : "section-row"}"><td colspan="5">${PANEL_LABELS[key]}${d.rrEnabled ? " — R&R" : d.convEnabled ? " — Conv." : ""}</td></tr>`;
     if (np) {
-      // R&R or Conventional — labor line
-      const modeLabel = d.rrEnabled ? "R&R — Remove & Replace" : "Conventional Repair";
       const mh = d.rrEnabled ? (d.rrHours || 0) : (d.convHours || 0);
       const mc = d.rrEnabled ? (d.rrCost || 0) : (d.convCost || 0);
-      lineNum++;
-      totalLabor += mc;
-      rows += `<tr><td class="ln">${lineNum}</td><td>${modeLabel}</td><td>${mh.toFixed(1)} hrs</td><td></td><td class="amt">$${mc.toFixed(2)}</td></tr>`;
+      lineNum++; totalLabor += mc;
+      rows += `<tr><td class="ln">${lineNum}</td><td>${d.rrEnabled ? "R&R — Remove & Replace" : "Conventional Repair"}</td><td>${mh.toFixed(1)} hrs</td><td></td><td class="amt">$${mc.toFixed(2)}</td></tr>`;
     } else {
-      // PDR line
-      lineNum++;
-      const pdrPrice = d.basePrice || 0;
-      totalPrice += pdrPrice;
-      rows += `<tr><td class="ln">${lineNum}</td><td>PDR — ${(d.selectedRange || d.count)} ${DENT_SIZE_LABELS[d.size].toLowerCase()} dents</td><td>1</td><td class="amt">$${pdrPrice.toLocaleString()}</td><td></td></tr>`;
-
-      // Add-on lines (separate from PDR)
+      lineNum++; totalPrice += (d.basePrice || 0);
+      rows += `<tr><td class="ln">${lineNum}</td><td>PDR — ${(d.selectedRange || d.count)} ${DENT_SIZE_LABELS[d.size].toLowerCase()} dents</td><td>1</td><td class="amt">$${(d.basePrice || 0).toLocaleString()}</td><td></td></tr>`;
       if (d.addons && d.addons.length > 0) {
         d.addons.forEach(name => {
           const a = ADDONS.find(x => x.name === name);
           if (!a) return;
-          let addonAmt = 0;
-          let qty = "";
+          let addonAmt = 0, qty = "";
           if (a.type === "dollar") {
             if (name === "Oversized Dent") { qty = `${d.osDentCount || 0} × $${a.value}`; addonAmt = a.value * (d.osDentCount || 0); }
             else if (name === "Double OS Dents") { qty = `${d.doubleOsCount || 0} × $${a.value}`; addonAmt = a.value * (d.doubleOsCount || 0); }
             else { qty = "1"; addonAmt = a.value; }
-          } else {
-            qty = `${(a.value * 100)}% of $${pdrPrice.toLocaleString()}`;
-            addonAmt = Math.round(pdrPrice * a.value);
-          }
-          if (addonAmt > 0) {
-            lineNum++;
-            totalPrice += addonAmt;
-            rows += `<tr class="addon-row"><td class="ln">${lineNum}</td><td>Add-on: ${name}</td><td>${qty}</td><td class="amt">$${addonAmt.toLocaleString()}</td><td></td></tr>`;
-          }
+          } else { qty = `${(a.value*100)}% of $${(d.basePrice||0).toLocaleString()}`; addonAmt = Math.round((d.basePrice||0) * a.value); }
+          if (addonAmt > 0) { lineNum++; totalPrice += addonAmt; rows += `<tr class="addon-row"><td class="ln">${lineNum}</td><td>Add-on: ${name}</td><td>${qty}</td><td class="amt">$${addonAmt.toLocaleString()}</td><td></td></tr>`; }
         });
       }
     }
-
-    // R&I operation lines (labor)
     if (d.riEnabled) {
-      const ops = (RI_OPERATIONS[key] || []);
-      const included = ops.filter(op => d.riIncluded && d.riIncluded[op.id]);
-      included.forEach(op => {
+      (RI_OPERATIONS[key] || []).filter(op => d.riIncluded && d.riIncluded[op.id]).forEach(op => {
         const time = (d.riTimes && d.riTimes[op.id] != null) ? d.riTimes[op.id] : op.time;
         const cost = Math.round(time * rate * 100) / 100;
         const isOpRr = d.riRr && d.riRr[op.id];
-        const opLabel = isOpRr ? `R&R: ${op.name}` : `R&I: ${op.name}`;
-        const rowClass = isOpRr ? "rr-labor-row" : "labor-row";
-        lineNum++;
-        totalLabor += cost;
-        rows += `<tr class="${rowClass}"><td class="ln">${lineNum}</td><td>${opLabel}</td><td>${time.toFixed(1)} hrs @ $${rate.toFixed(2)}</td><td></td><td class="amt">$${cost.toFixed(2)}</td></tr>`;
+        lineNum++; totalLabor += cost;
+        rows += `<tr class="${isOpRr ? "rr-labor-row" : "labor-row"}"><td class="ln">${lineNum}</td><td>${isOpRr ? "R&R" : "R&I"}: ${op.name}</td><td>${time.toFixed(1)} hrs @ $${rate.toFixed(2)}</td><td></td><td class="amt">$${cost.toFixed(2)}</td></tr>`;
       });
     }
-
     return rows;
   }).join("");
 
-  const grandTotalCalc = totalPrice + totalLabor;
-
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Hail Damage Estimate</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,sans-serif;color:#1e293b;padding:40px;max-width:800px;margin:0 auto;font-size:13px}
-.header{border-bottom:3px solid #0f172a;padding-bottom:20px;margin-bottom:24px}
-.header h1{font-size:22px;font-weight:800;letter-spacing:-0.5px}
-.header p{color:#64748b;margin-top:4px;font-size:13px}
-.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;margin-bottom:24px;font-size:13px}
-.info-grid dt{color:#64748b;font-weight:500}.info-grid dd{font-weight:600}
-table{width:100%;border-collapse:collapse;margin-bottom:20px}
-th{background:#0f172a;color:#f8fafc;padding:8px 10px;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.5px}
-td{padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:13px}
-.ln{width:36px;color:#94a3b8;font-weight:600;text-align:center;font-size:12px}
-.amt{text-align:right;font-weight:600;white-space:nowrap}
-.section-row td{background:#f5f5f5;font-weight:800;font-size:13px;color:#1e293b;padding:8px 10px;border-bottom:2px solid #cbd5e1}
-.section-row-rr td{background:#f5f5f5;font-weight:800;font-size:13px;color:#1e293b;padding:8px 10px;border-bottom:2px solid #cbd5e1}
-.addon-row td{color:#475569}
-.labor-row td{color:#1e293b}
-.labor-row .amt{font-weight:700}
-.rr-labor-row td{color:#1e293b}
-.rr-labor-row .amt{font-weight:700}
-.subtotal-row td{border-top:2px solid #cbd5e1;font-weight:700;font-size:13px;padding:8px 10px}
-.total-row td{border-top:3px solid #1e293b;font-weight:800;font-size:15px;padding:10px}
-.total-row .amt{font-size:16px}
-.photos{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
-.photos img{width:150px;height:110px;object-fit:cover;border-radius:6px;border:1px solid #e2e8f0}
-.footer{margin-top:40px;padding-top:20px;border-top:1px solid #e2e8f0;font-size:11px;color:#94a3b8;text-align:center}
-@media print{body{padding:20px}button{display:none}}
-</style></head><body>
-<div class="header"><h1>HAIL DAMAGE ESTIMATE</h1><p>State Farm Matrix Pricing — ${date}</p></div>
-<dl class="info-grid">
-<dt>Owner</dt><dd>${vehicleInfo.owner || "—"}</dd>
-<dt>Vehicle</dt><dd>${[vehicleInfo.year, vehicleInfo.make, vehicleInfo.model].filter(Boolean).join(" ") || "—"}</dd>
-<dt>VIN</dt><dd>${vehicleInfo.vin || "—"}</dd>
-<dt>Claim #</dt><dd>${vehicleInfo.claim || "—"}</dd>
-</dl>
-<table>
-<thead><tr><th style="width:36px">Line</th><th>Operation</th><th>Qty</th><th style="text-align:right">Price $</th><th style="text-align:right">Labor $</th></tr></thead>
-<tbody>
-${allRows}
-<tr class="subtotal-row"><td></td><td colspan="2">Subtotals</td><td class="amt">$${totalPrice.toLocaleString()}</td><td class="amt">$${totalLabor.toFixed(2)}</td></tr>
-<tr class="total-row"><td></td><td colspan="2">GRAND TOTAL</td><td colspan="2" class="amt">$${grandTotal.toLocaleString()}</td></tr>
-</tbody>
-</table>
-${photos.length > 0 ? `<h3 style="margin-bottom:12px;font-size:14px">Documentation Photos</h3><div class="photos">${photos.map(p => `<img src="${p.url}" />`).join("")}</div>` : ""}
-<div class="footer">Generated by HailScope Estimator — ${date}</div>
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>NTX Hail — Estimate</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Segoe UI',system-ui,sans-serif;color:#1e293b;padding:40px;max-width:800px;margin:0 auto;font-size:13px}.header{border-bottom:3px solid #0a1628;padding-bottom:20px;margin-bottom:24px}.brand{display:flex;align-items:center;gap:10px}.brand-name{font-size:18px;font-weight:900;letter-spacing:1px;color:#0a1628}.brand-tag{font-size:11px;color:#2563eb;font-weight:700;letter-spacing:2px;text-transform:uppercase}.header p{color:#64748b;margin-top:4px;font-size:13px}.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;margin-bottom:24px;font-size:13px}.info-grid dt{color:#64748b;font-weight:500}.info-grid dd{font-weight:600}table{width:100%;border-collapse:collapse;margin-bottom:20px}th{background:#0a1628;color:#f8fafc;padding:8px 10px;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.5px}td{padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:13px}.ln{width:36px;color:#94a3b8;font-weight:600;text-align:center;font-size:12px}.amt{text-align:right;font-weight:600;white-space:nowrap}.section-row td{background:#eff6ff;font-weight:800;font-size:13px;color:#1e3a5f;padding:8px 10px;border-bottom:2px solid #bfdbfe}.section-row-rr td{background:#fef2f2;font-weight:800;font-size:13px;color:#7f1d1d;padding:8px 10px;border-bottom:2px solid #fecaca}.addon-row td{color:#475569}.labor-row td{color:#1e293b}.rr-labor-row td{color:#dc2626}.subtotal-row td{border-top:2px solid #cbd5e1;font-weight:700;font-size:13px;padding:8px 10px}.total-row td{border-top:3px solid #0a1628;font-weight:800;font-size:15px;padding:10px}.total-row .amt{font-size:16px;color:#2563eb}.photos{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}.photos img{width:150px;height:110px;object-fit:cover;border-radius:6px;border:1px solid #e2e8f0}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #e2e8f0;font-size:11px;color:#94a3b8;text-align:center}@media print{body{padding:20px}button{display:none}}</style>
+</head><body>
+<div class="header"><div class="brand"><div><div class="brand-name">NTX HAIL</div><div class="brand-tag">HailSpec Estimator</div></div></div><p>State Farm Matrix Pricing — ${date}</p></div>
+<dl class="info-grid"><dt>Owner</dt><dd>${vehicleInfo.owner||"—"}</dd><dt>Vehicle</dt><dd>${[vehicleInfo.year,vehicleInfo.make,vehicleInfo.model].filter(Boolean).join(" ")||"—"}</dd><dt>VIN</dt><dd>${vehicleInfo.vin||"—"}</dd><dt>Claim #</dt><dd>${vehicleInfo.claim||"—"}</dd></dl>
+<table><thead><tr><th style="width:36px">Line</th><th>Operation</th><th>Qty</th><th style="text-align:right">Price $</th><th style="text-align:right">Labor $</th></tr></thead>
+<tbody>${allRows}<tr class="subtotal-row"><td></td><td colspan="2">Subtotals</td><td class="amt">$${totalPrice.toLocaleString()}</td><td class="amt">$${totalLabor.toFixed(2)}</td></tr>
+<tr class="total-row"><td></td><td colspan="2">GRAND TOTAL</td><td colspan="2" class="amt">$${grandTotal.toLocaleString()}</td></tr></tbody></table>
+${photos.length > 0 ? `<h3 style="margin-bottom:12px;font-size:14px">Documentation Photos</h3><div class="photos">${photos.map(p=>`<img src="${p.url}"/>`).join("")}</div>` : ""}
+<div class="footer">Generated by HailSpec — NTX Hail | ntxhail.com — ${date}</div>
 </body></html>`;
 }
 
-// ─── VEHICLE MAKES & MODELS ─────────────────────────────────────────────────
+// ─── VEHICLE DATA ─────────────────────────────────────────────────────────────
 const VEHICLE_YEARS = Array.from({ length: 17 }, (_, i) => String(2026 - i));
-
 const VEHICLE_DATA = {
-  "Acura": ["ILX","Integra","MDX","RDX","TLX"],
-  "Alfa Romeo": ["Giulia","Stelvio","Tonale"],
-  "Audi": ["A3","A4","A5","A6","A7","A8","e-tron","Q3","Q4","Q5","Q7","Q8","RS5","RS7","S4","S5","TT"],
-  "BMW": ["2 Series","3 Series","4 Series","5 Series","7 Series","8 Series","i4","i5","i7","iX","X1","X2","X3","X4","X5","X6","X7","Z4"],
-  "Buick": ["Enclave","Encore","Encore GX","Envision","Envista"],
-  "Cadillac": ["CT4","CT5","Escalade","Escalade ESV","LYRIQ","XT4","XT5","XT6"],
-  "Chevrolet": ["Blazer","Bolt EUV","Bolt EV","Camaro","Colorado","Corvette","Equinox","Express","Malibu","Silverado 1500","Silverado 2500HD","Silverado 3500HD","Suburban","Tahoe","Trailblazer","Traverse","Trax"],
-  "Chrysler": ["300","Pacifica","Voyager"],
-  "Dodge": ["Challenger","Charger","Durango","Hornet"],
-  "Fiat": ["500X"],
-  "Ford": ["Bronco","Bronco Sport","E-Transit","Edge","Escape","Expedition","Explorer","F-150","F-150 Lightning","F-250","F-350","Maverick","Mustang","Mustang Mach-E","Ranger","Transit"],
-  "Genesis": ["Electrified G80","Electrified GV70","G70","G80","G90","GV60","GV70","GV80"],
-  "GMC": ["Acadia","Canyon","Hummer EV","Sierra 1500","Sierra 2500HD","Sierra 3500HD","Terrain","Yukon","Yukon XL"],
-  "Honda": ["Accord","Civic","CR-V","HR-V","Odyssey","Passport","Pilot","Prologue","Ridgeline"],
-  "Hyundai": ["Elantra","Ioniq 5","Ioniq 6","Kona","Palisade","Santa Cruz","Santa Fe","Sonata","Tucson","Venue"],
-  "Infiniti": ["Q50","Q60","QX50","QX55","QX60","QX80"],
-  "Jaguar": ["E-PACE","F-PACE","F-TYPE","I-PACE","XF"],
-  "Jeep": ["Cherokee","Compass","Gladiator","Grand Cherokee","Grand Cherokee L","Grand Wagoneer","Renegade","Wagoneer","Wrangler"],
-  "Kia": ["Carnival","EV6","EV9","Forte","K5","Niro","Rio","Seltos","Sorento","Soul","Sportage","Stinger","Telluride"],
-  "Land Rover": ["Defender","Discovery","Discovery Sport","Range Rover","Range Rover Evoque","Range Rover Sport","Range Rover Velar"],
-  "Lexus": ["ES","GX","IS","LC","LS","LX","NX","RC","RX","RZ","TX","UX"],
-  "Lincoln": ["Aviator","Corsair","Nautilus","Navigator"],
-  "Maserati": ["Ghibli","GranTurismo","Grecale","Levante","MC20","Quattroporte"],
-  "Mazda": ["CX-30","CX-5","CX-50","CX-70","CX-90","Mazda3","MX-30","MX-5 Miata"],
-  "Mercedes-Benz": ["A-Class","AMG GT","C-Class","CLA","CLE","E-Class","EQB","EQE","EQS","G-Class","GLA","GLB","GLC","GLE","GLS","S-Class","SL"],
-  "Mini": ["Clubman","Convertible","Countryman","Hardtop"],
-  "Mitsubishi": ["Eclipse Cross","Mirage","Outlander","Outlander Sport"],
-  "Nissan": ["Altima","Armada","Frontier","KICKS","Leaf","Maxima","Murano","Pathfinder","Rogue","Sentra","Titan","Versa","Z"],
-  "Porsche": ["718 Boxster","718 Cayman","911","Cayenne","Macan","Panamera","Taycan"],
-  "Ram": ["1500","2500","3500","ProMaster"],
-  "Rivian": ["R1S","R1T"],
-  "Subaru": ["Ascent","BRZ","Crosstrek","Forester","Impreza","Legacy","Outback","Solterra","WRX"],
-  "Tesla": ["Model 3","Model S","Model X","Model Y","Cybertruck"],
-  "Toyota": ["4Runner","bZ4X","Camry","Corolla","Corolla Cross","Crown","GR86","GR Supra","Grand Highlander","Highlander","Land Cruiser","Prius","RAV4","Sequoia","Sienna","Tacoma","Tundra","Venza"],
-  "Volkswagen": ["Atlas","Atlas Cross Sport","Golf GTI","Golf R","ID.4","Jetta","Taos","Tiguan"],
-  "Volvo": ["C40 Recharge","S60","S90","V60","V90","XC40","XC60","XC90"],
+  "Acura":["ILX","Integra","MDX","RDX","TLX"],"Alfa Romeo":["Giulia","Stelvio","Tonale"],
+  "Audi":["A3","A4","A5","A6","A7","A8","e-tron","Q3","Q4","Q5","Q7","Q8","RS5","RS7","S4","S5","TT"],
+  "BMW":["2 Series","3 Series","4 Series","5 Series","7 Series","8 Series","i4","i5","i7","iX","X1","X2","X3","X4","X5","X6","X7","Z4"],
+  "Buick":["Enclave","Encore","Encore GX","Envision","Envista"],
+  "Cadillac":["CT4","CT5","Escalade","Escalade ESV","LYRIQ","XT4","XT5","XT6"],
+  "Chevrolet":["Blazer","Bolt EUV","Bolt EV","Camaro","Colorado","Corvette","Equinox","Express","Malibu","Silverado 1500","Silverado 2500HD","Silverado 3500HD","Suburban","Tahoe","Trailblazer","Traverse","Trax"],
+  "Chrysler":["300","Pacifica","Voyager"],"Dodge":["Challenger","Charger","Durango","Hornet"],
+  "Ford":["Bronco","Bronco Sport","E-Transit","Edge","Escape","Expedition","Explorer","F-150","F-150 Lightning","F-250","F-350","Maverick","Mustang","Mustang Mach-E","Ranger","Transit"],
+  "Genesis":["Electrified G80","Electrified GV70","G70","G80","G90","GV60","GV70","GV80"],
+  "GMC":["Acadia","Canyon","Hummer EV","Sierra 1500","Sierra 2500HD","Sierra 3500HD","Terrain","Yukon","Yukon XL"],
+  "Honda":["Accord","Civic","CR-V","HR-V","Odyssey","Passport","Pilot","Prologue","Ridgeline"],
+  "Hyundai":["Elantra","Ioniq 5","Ioniq 6","Kona","Palisade","Santa Cruz","Santa Fe","Sonata","Tucson","Venue"],
+  "Infiniti":["Q50","Q60","QX50","QX55","QX60","QX80"],"Jeep":["Cherokee","Compass","Gladiator","Grand Cherokee","Grand Cherokee L","Grand Wagoneer","Renegade","Wagoneer","Wrangler"],
+  "Kia":["Carnival","EV6","EV9","Forte","K5","Niro","Rio","Seltos","Sorento","Soul","Sportage","Stinger","Telluride"],
+  "Land Rover":["Defender","Discovery","Discovery Sport","Range Rover","Range Rover Evoque","Range Rover Sport","Range Rover Velar"],
+  "Lexus":["ES","GX","IS","LC","LS","LX","NX","RC","RX","RZ","TX","UX"],
+  "Lincoln":["Aviator","Corsair","Nautilus","Navigator"],
+  "Mazda":["CX-30","CX-5","CX-50","CX-70","CX-90","Mazda3","MX-30","MX-5 Miata"],
+  "Mercedes-Benz":["A-Class","AMG GT","C-Class","CLA","CLE","E-Class","EQB","EQE","EQS","G-Class","GLA","GLB","GLC","GLE","GLS","S-Class","SL"],
+  "Mini":["Clubman","Convertible","Countryman","Hardtop"],"Mitsubishi":["Eclipse Cross","Mirage","Outlander","Outlander Sport"],
+  "Nissan":["Altima","Armada","Frontier","KICKS","Leaf","Maxima","Murano","Pathfinder","Rogue","Sentra","Titan","Versa","Z"],
+  "Porsche":["718 Boxster","718 Cayman","911","Cayenne","Macan","Panamera","Taycan"],
+  "Ram":["1500","2500","3500","ProMaster"],"Rivian":["R1S","R1T"],
+  "Subaru":["Ascent","BRZ","Crosstrek","Forester","Impreza","Legacy","Outback","Solterra","WRX"],
+  "Tesla":["Model 3","Model S","Model X","Model Y","Cybertruck"],
+  "Toyota":["4Runner","bZ4X","Camry","Corolla","Corolla Cross","Crown","GR86","GR Supra","Grand Highlander","Highlander","Land Cruiser","Prius","RAV4","Sequoia","Sienna","Tacoma","Tundra","Venza"],
+  "Volkswagen":["Atlas","Atlas Cross Sport","Golf GTI","Golf R","ID.4","Jetta","Taos","Tiguan"],
+  "Volvo":["C40 Recharge","S60","S90","V60","V90","XC40","XC60","XC90"],
 };
-
 const VEHICLE_MAKES = Object.keys(VEHICLE_DATA).sort();
 
-// ─── SEARCH SELECT ──────────────────────────────────────────────────────────
+// ─── SEARCH SELECT ────────────────────────────────────────────────────────────
 function SearchSelect({ items, value, onChange, placeholder }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const wrapRef = useRef(null);
-
-  const filtered = query
-    ? items.filter(i => i.toLowerCase().includes(query.toLowerCase()))
-    : items;
-
-  const handleSelect = (item) => {
-    onChange(item);
-    setQuery("");
-    setOpen(false);
-  };
-
+  const filtered = query ? items.filter(i => i.toLowerCase().includes(query.toLowerCase())) : items;
   return (
-    <div ref={wrapRef} style={styles.ssWrap}>
-      <input
-        type="text"
-        value={open ? query : value}
-        placeholder={placeholder}
+    <div style={styles.ssWrap}>
+      <input type="text" value={open ? query : value} placeholder={placeholder}
         onFocus={() => { setOpen(true); setQuery(""); }}
         onChange={e => { setQuery(e.target.value); if (!open) setOpen(true); }}
-        style={{ ...styles.ssInput, ...(value && !open ? styles.ssInputFilled : {}) }}
-      />
-      {value && !open && (
-        <button style={styles.ssClear} onClick={() => { onChange(""); setQuery(""); }}>✕</button>
-      )}
+        style={{ ...styles.ssInput, ...(value && !open ? styles.ssInputFilled : {}) }} />
+      {value && !open && <button style={styles.ssClear} onClick={() => onChange("")}>✕</button>}
       {open && (
         <div style={styles.ssDropdown}>
           {filtered.map(item => (
-            <button key={item} onClick={() => handleSelect(item)}
-              style={{ ...styles.ssOption, ...(value === item ? styles.ssOptionActive : {}) }}>
-              {item}
-            </button>
+            <button key={item} onClick={() => { onChange(item); setQuery(""); setOpen(false); }}
+              style={{ ...styles.ssOption, ...(value === item ? styles.ssOptionActive : {}) }}>{item}</button>
           ))}
-          {filtered.length === 0 && (
-            <div style={styles.ssEmpty}>No matches</div>
-          )}
+          {filtered.length === 0 && <div style={styles.ssEmpty}>No matches</div>}
         </div>
       )}
       {open && <div style={styles.ssBackdrop} onClick={() => { setOpen(false); setQuery(""); }} />}
@@ -1109,636 +1126,301 @@ function SearchSelect({ items, value, onChange, placeholder }) {
   );
 }
 
-// ─── VIN DECODER ────────────────────────────────────────────────────────────
-const VIN_WMI_MAKES = {
-  "1G1":"Chevrolet","1G2":"Pontiac","1GC":"Chevrolet","1GT":"GMC","1G6":"Cadillac","1GY":"Cadillac",
-  "1FA":"Ford","1FB":"Ford","1FC":"Ford","1FD":"Ford","1FM":"Ford","1FT":"Ford",
-  "1FU":"Freightliner","1FV":"Freightliner",
-  "1GK":"GMC","1GM":"Pontiac",
-  "1HG":"Honda","1HF":"Honda",
-  "1C3":"Chrysler","1C4":"Chrysler","1C6":"Ram","1C7":"Chrysler",
-  "1D3":"Dodge","1D4":"Dodge","1D7":"Dodge","1D8":"Dodge",
-  "1J4":"Jeep","1J8":"Jeep",
-  "1LN":"Lincoln","1L1":"Lincoln",
-  "1ME":"Mercury",
-  "1N4":"Nissan","1N6":"Nissan",
-  "1V2":"Volkswagen","1VW":"Volkswagen",
-  "1YV":"Mazda","1ZV":"Ford",
-  "2C3":"Chrysler","2C4":"Chrysler","2D3":"Dodge",
-  "2FA":"Ford","2FB":"Ford","2FM":"Ford","2FT":"Ford",
-  "2G1":"Chevrolet","2G2":"Pontiac","2GK":"GMC",
-  "2HG":"Honda","2HK":"Honda","2HJ":"Honda","2HN":"Honda",
-  "2T1":"Toyota","2T2":"Lexus","2T3":"Toyota",
-  "3C4":"Chrysler","3C6":"Ram","3D7":"Ram",
-  "3FA":"Ford","3FM":"Ford","3FT":"Ford",
-  "3G1":"Chevrolet","3GN":"GMC","3GT":"GMC","3GK":"GMC",
-  "3HG":"Honda","3H1":"Honda",
-  "3N1":"Nissan","3N6":"Nissan",
-  "3TM":"Toyota","3TY":"Toyota",
-  "3VW":"Volkswagen","3VV":"Volkswagen",
-  "4F2":"Mazda","4F4":"Mazda",
-  "4S3":"Subaru","4S4":"Subaru","4S6":"Subaru",
-  "4T1":"Toyota","4T3":"Toyota","4T4":"Toyota",
-  "4US":"BMW",
-  "5F":"Honda","5J6":"Honda","5FN":"Honda",
-  "5N1":"Nissan","5NP":"Hyundai","5NM":"Hyundai",
-  "5T":"Toyota","5TD":"Toyota","5TF":"Toyota","5TJ":"Toyota",
-  "5UX":"BMW","5UM":"BMW",
-  "5XY":"Kia","5XX":"Kia",
-  "5YF":"Toyota","5YJ":"Tesla",
-  "5LJ":"Lincoln",
-  "7A3":"Tesla",
-  "JA3":"Mitsubishi","JA4":"Mitsubishi","JA7":"Mitsubishi",
-  "JF1":"Subaru","JF2":"Subaru",
-  "JH4":"Acura","JHM":"Honda",
-  "JM1":"Mazda","JM3":"Mazda",
-  "JN1":"Nissan","JN8":"Nissan",
-  "JT2":"Toyota","JT3":"Toyota","JT4":"Toyota","JTD":"Toyota","JTE":"Toyota","JTH":"Lexus","JTJ":"Lexus","JTK":"Toyota","JTM":"Toyota","JTN":"Toyota",
-  "KL4":"Buick","KL7":"Chevrolet",
-  "KM8":"Hyundai","KMH":"Hyundai",
-  "KNA":"Kia","KND":"Kia","KNM":"Kia",
-  "L6T":"Geely","LFV":"FAW-Volkswagen",
-  "MAJ":"Ford",
-  "NM0":"Ford",
-  "SAJ":"Jaguar","SAL":"Land Rover","SAR":"Land Rover",
-  "SCA":"Rolls-Royce","SCC":"Lotus","SCF":"Aston Martin",
-  "TRU":"Audi",
-  "WAU":"Audi","WA1":"Audi","WBA":"BMW","WBS":"BMW","WBY":"BMW","WDB":"Mercedes-Benz","WDC":"Mercedes-Benz","WDD":"Mercedes-Benz","WMW":"Mini","WF0":"Ford","WP0":"Porsche","WP1":"Porsche","WVW":"Volkswagen","WV2":"Volkswagen",
-  "YV1":"Volvo","YV4":"Volvo",
-  "ZAM":"Maserati","ZAR":"Alfa Romeo","ZFF":"Ferrari",
-  "19U":"Acura","19X":"Honda",
-};
-
-const VIN_YEAR_CODES = {
-  "A":"2010","B":"2011","C":"2012","D":"2013","E":"2014","F":"2015",
-  "G":"2016","H":"2017","J":"2018","K":"2019","L":"2020","M":"2021",
-  "N":"2022","P":"2023","R":"2024","S":"2025","T":"2026","V":"2027",
-};
+// ─── VIN DECODE ───────────────────────────────────────────────────────────────
+const VIN_WMI_MAKES = { "1G1":"Chevrolet","1GC":"Chevrolet","1GT":"GMC","1G6":"Cadillac","1FA":"Ford","1FB":"Ford","1FC":"Ford","1FD":"Ford","1FM":"Ford","1FT":"Ford","1GK":"GMC","1HG":"Honda","1C3":"Chrysler","1C4":"Chrysler","1C6":"Ram","1D3":"Dodge","1D4":"Dodge","1D7":"Dodge","1J4":"Jeep","1J8":"Jeep","1LN":"Lincoln","1N4":"Nissan","1N6":"Nissan","1VW":"Volkswagen","1YV":"Mazda","2HG":"Honda","2HK":"Honda","2T1":"Toyota","2T2":"Lexus","3VW":"Volkswagen","4S3":"Subaru","4S4":"Subaru","4T1":"Toyota","4T3":"Toyota","4T4":"Toyota","5FN":"Honda","5J6":"Honda","5N1":"Nissan","5NP":"Hyundai","5NM":"Hyundai","5TD":"Toyota","5TF":"Toyota","5YJ":"Tesla","JA3":"Mitsubishi","JA4":"Mitsubishi","JF1":"Subaru","JF2":"Subaru","JH4":"Acura","JHM":"Honda","JM1":"Mazda","JM3":"Mazda","JN1":"Nissan","JN8":"Nissan","JT2":"Toyota","JT3":"Toyota","JTD":"Toyota","JTE":"Toyota","JTH":"Lexus","JTK":"Toyota","JTM":"Toyota","KM8":"Hyundai","KMH":"Hyundai","KNA":"Kia","KND":"Kia","WAU":"Audi","WA1":"Audi","WBA":"BMW","WBS":"BMW","WDB":"Mercedes-Benz","WDC":"Mercedes-Benz","WDD":"Mercedes-Benz","WMW":"Mini","WP0":"Porsche","WP1":"Porsche","WVW":"Volkswagen","YV1":"Volvo","YV4":"Volvo","ZAM":"Maserati","ZAR":"Alfa Romeo","19U":"Acura","19X":"Honda" };
+const VIN_YEAR_CODES = { "A":"2010","B":"2011","C":"2012","D":"2013","E":"2014","F":"2015","G":"2016","H":"2017","J":"2018","K":"2019","L":"2020","M":"2021","N":"2022","P":"2023","R":"2024","S":"2025","T":"2026" };
 
 function decodeVIN(vin) {
   if (!vin || vin.length !== 17) return null;
   const v = vin.toUpperCase();
-  
-  // Year from position 10
-  const yearCode = v[9];
-  const year = VIN_YEAR_CODES[yearCode] || null;
-  
-  // Make from WMI (first 3 chars, then try first 2)
+  const year = VIN_YEAR_CODES[v[9]] || null;
   const wmi3 = v.substring(0, 3);
-  const wmi2 = v.substring(0, 2);
   let make = VIN_WMI_MAKES[wmi3] || null;
-  if (!make) {
-    // Try 2-char prefix match
-    for (const [prefix, m] of Object.entries(VIN_WMI_MAKES)) {
-      if (prefix.length === 2 && wmi2 === prefix) { make = m; break; }
-      if (wmi3.startsWith(prefix)) { make = m; break; }
-    }
-  }
-  
+  if (!make) { for (const [p, m] of Object.entries(VIN_WMI_MAKES)) { if (wmi3.startsWith(p)) { make = m; break; } } }
   return { year, make };
 }
 
-// ─── VIN SCANNER ────────────────────────────────────────────────────────────
-function VinScanner({ onResult, onClose }) {
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const streamRef = useRef(null);
-  const scanIntervalRef = useRef(null);
-  const [status, setStatus] = useState("starting"); // starting | scanning | captured | error | nosupport
-  const [capturedVin, setCapturedVin] = useState("");
-  const [manualEdit, setManualEdit] = useState(false);
-
-  const stopCamera = () => {
-    if (scanIntervalRef.current) clearInterval(scanIntervalRef.current);
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop());
-      streamRef.current = null;
-    }
-  };
-
-  const startCamera = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
-      }
-      setStatus("scanning");
-
-      // Try BarcodeDetector API for live scanning
-      if ("BarcodeDetector" in window) {
-        try {
-          const detector = new BarcodeDetector({ formats: ["code_39", "code_128"] });
-          scanIntervalRef.current = setInterval(async () => {
-            if (!videoRef.current || videoRef.current.readyState < 2) return;
-            try {
-              const barcodes = await detector.detect(videoRef.current);
-              for (const bc of barcodes) {
-                const raw = bc.rawValue.replace(/[^A-HJ-NPR-Z0-9]/gi, "").toUpperCase();
-                if (raw.length === 17) {
-                  stopCamera();
-                  setCapturedVin(raw);
-                  setStatus("captured");
-                  return;
-                }
-              }
-            } catch (e) {}
-          }, 300);
-        } catch (e) {
-          // BarcodeDetector not supported for these formats
-        }
-      }
-    } catch (e) {
-      setStatus("error");
-    }
-  }, []);
-
-  // Start camera on mount
-  useState(() => {
-    startCamera();
-    return () => stopCamera();
-  });
-
-  const handleCapture = () => {
-    if (!videoRef.current || !canvasRef.current) return;
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0);
-    stopCamera();
-    setStatus("captured");
-    setManualEdit(true);
-  };
-
-  const handleClose = () => {
-    stopCamera();
-    onClose();
-  };
-
-  const handleConfirm = () => {
-    const clean = capturedVin.toUpperCase().replace(/[^A-HJ-NPR-Z0-9]/g, "").slice(0, 17);
-    if (clean.length > 0) onResult(clean);
-    else onClose();
-  };
-
-  return (
-    <div style={styles.vinScanOverlay}>
-      <style>{`@keyframes vinScanAnim { 0%,100%{ top:40% } 50%{ top:55% } }`}</style>
-      <div style={styles.vinScanModal}>
-        <div style={styles.vinScanHeader}>
-          <div style={styles.vinScanTitle}>Scan VIN</div>
-          <button onClick={handleClose} style={styles.vinScanClose}>✕</button>
-        </div>
-
-        {(status === "starting" || status === "scanning") && (
-          <>
-            <div style={styles.vinVideoWrap}>
-              <video ref={videoRef} style={styles.vinVideo} playsInline muted />
-              {/* Scan target overlay */}
-              <div style={styles.vinScanTarget}>
-                <div style={styles.vinScanTargetBox}>
-                  <div style={styles.vinScanCorner1} />
-                  <div style={styles.vinScanCorner2} />
-                  <div style={styles.vinScanCorner3} />
-                  <div style={styles.vinScanCorner4} />
-                </div>
-                <div style={styles.vinScanLabel}>
-                  {status === "starting" ? "Starting camera..." : "Point at VIN barcode or plate"}
-                </div>
-              </div>
-              {/* Scan line animation */}
-              {status === "scanning" && <div style={styles.vinScanLine} />}
-            </div>
-            <div style={styles.vinScanActions}>
-              <button onClick={handleCapture} style={styles.vinCaptureBtn}>
-                <div style={styles.vinCaptureBtnInner} />
-              </button>
-              <div style={styles.vinScanHint}>
-                Auto-scans barcodes • Tap button to capture manually
-              </div>
-            </div>
-          </>
-        )}
-
-        {status === "captured" && (
-          <div style={styles.vinCapturedWrap}>
-            <div style={styles.vinCapturedIcon}>
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round">
-                <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
-              </svg>
-            </div>
-            {capturedVin && !manualEdit ? (
-              <>
-                <div style={styles.vinCapturedLabel}>VIN Detected</div>
-                <div style={styles.vinCapturedValue}>{capturedVin}</div>
-                <div style={styles.vinCapturedBtns}>
-                  <button onClick={handleConfirm} style={styles.vinConfirmBtn}>Use This VIN</button>
-                  <button onClick={() => setManualEdit(true)} style={styles.vinEditBtn}>Edit</button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div style={styles.vinCapturedLabel}>
-                  {manualEdit ? "Type the VIN from the image" : "Enter VIN manually"}
-                </div>
-                <input value={capturedVin}
-                  onChange={e => setCapturedVin(e.target.value.toUpperCase().replace(/[^A-HJ-NPR-Z0-9]/g, "").slice(0, 17))}
-                  style={styles.vinManualInput}
-                  placeholder="Enter 17-character VIN"
-                  maxLength={17} autoCapitalize="characters" autoFocus />
-                <div style={styles.vinManualCount}>{capturedVin.length}/17</div>
-                <div style={styles.vinCapturedBtns}>
-                  <button onClick={handleConfirm} style={{ ...styles.vinConfirmBtn, opacity: capturedVin.length === 17 ? 1 : 0.4 }}
-                    disabled={capturedVin.length !== 17}>
-                    Confirm VIN
-                  </button>
-                  <button onClick={() => { setStatus("starting"); setCapturedVin(""); setManualEdit(false); startCamera(); }}
-                    style={styles.vinEditBtn}>Rescan</button>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {status === "error" && (
-          <div style={styles.vinCapturedWrap}>
-            <div style={{ ...styles.vinCapturedIcon, color: "#ef4444" }}>
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round">
-                <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
-              </svg>
-            </div>
-            <div style={styles.vinCapturedLabel}>Camera access denied</div>
-            <div style={{ color: "#94a3b8", fontSize: 13, textAlign: "center", marginBottom: 16 }}>
-              Allow camera access in your browser settings, or enter VIN manually below.
-            </div>
-            <input value={capturedVin}
-              onChange={e => setCapturedVin(e.target.value.toUpperCase().replace(/[^A-HJ-NPR-Z0-9]/g, "").slice(0, 17))}
-              style={styles.vinManualInput}
-              placeholder="Enter 17-character VIN" maxLength={17} autoCapitalize="characters" autoFocus />
-            <div style={styles.vinCapturedBtns}>
-              <button onClick={handleConfirm} style={{ ...styles.vinConfirmBtn, opacity: capturedVin.length === 17 ? 1 : 0.4 }}
-                disabled={capturedVin.length !== 17}>Confirm VIN</button>
-            </div>
-          </div>
-        )}
-      </div>
-      <canvas ref={canvasRef} style={{ display: "none" }} />
-    </div>
-  );
-}
-
-// ─── VEHICLE FORM ───────────────────────────────────────────────────────────
+// ─── VEHICLE FORM ─────────────────────────────────────────────────────────────
 function VehicleForm({ vehicleInfo, setVehicleInfo, onClose }) {
   const models = vehicleInfo.make ? (VEHICLE_DATA[vehicleInfo.make] || []) : [];
   const [vinStatus, setVinStatus] = useState(null);
-  const [showVinScanner, setShowVinScanner] = useState(false); // null | "decoded" | "partial" | "invalid"
-
-  const setField = (k, v) => {
-    setVehicleInfo(prev => {
-      const next = { ...prev, [k]: v };
-      if (k === "make" && v !== prev.make) next.model = "";
-      return next;
-    });
-  };
+  const setField = (k, v) => setVehicleInfo(prev => { const next = { ...prev, [k]: v }; if (k === "make" && v !== prev.make) next.model = ""; return next; });
 
   const handleVinChange = (e) => {
     const raw = e.target.value.toUpperCase().replace(/[^A-HJ-NPR-Z0-9]/g, "").slice(0, 17);
     setField("vin", raw);
-    
     if (raw.length === 17) {
       const decoded = decodeVIN(raw);
       if (decoded && (decoded.year || decoded.make)) {
         setVehicleInfo(prev => {
           const next = { ...prev, vin: raw };
           if (decoded.year) next.year = decoded.year;
-          if (decoded.make) {
-            // Match to our make list (case-insensitive)
-            const matchedMake = VEHICLE_MAKES.find(m => m.toLowerCase() === decoded.make.toLowerCase());
-            if (matchedMake) {
-              next.make = matchedMake;
-              if (prev.make !== matchedMake) next.model = "";
-            }
-          }
+          if (decoded.make) { const m = VEHICLE_MAKES.find(x => x.toLowerCase() === decoded.make.toLowerCase()); if (m) { next.make = m; if (prev.make !== m) next.model = ""; } }
           return next;
         });
         setVinStatus("decoded");
-      } else {
-        setVinStatus("partial");
-      }
-    } else if (raw.length > 0) {
-      setVinStatus(null);
-    } else {
-      setVinStatus(null);
-    }
+      } else { setVinStatus("partial"); }
+    } else { setVinStatus(null); }
   };
 
   return (
     <div style={styles.vehicleForm}>
       <div style={styles.vehicleFormTitle}>Vehicle / Claim Info</div>
-
       <div style={styles.vfGrid}>
-        <div style={styles.vfField}>
-          <label style={styles.vfLabel}>Owner Name</label>
-          <input value={vehicleInfo.owner} onChange={e => setField("owner", e.target.value)}
-            style={styles.vfInput} placeholder="Owner Name" />
-        </div>
-        <div style={styles.vfField}>
-          <label style={styles.vfLabel}>Claim #</label>
-          <input value={vehicleInfo.claim} onChange={e => setField("claim", e.target.value)}
-            style={styles.vfInput} placeholder="Claim #" />
-        </div>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Owner Name</label><input value={vehicleInfo.owner} onChange={e => setField("owner", e.target.value)} style={styles.vfInput} placeholder="Owner Name" /></div>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Claim #</label><input value={vehicleInfo.claim} onChange={e => setField("claim", e.target.value)} style={styles.vfInput} placeholder="Claim #" /></div>
       </div>
-
-      {/* VIN with decoder + camera scan */}
       <div style={{ marginTop: 10, marginBottom: 10 }}>
         <label style={styles.vfLabel}>VIN</label>
         <div style={styles.vinRow}>
           <input value={vehicleInfo.vin} onChange={handleVinChange}
             style={{ ...styles.vfInput, ...styles.vinInput, ...(vinStatus === "decoded" ? styles.vinInputDecoded : {}) }}
-            placeholder="Type or scan VIN" maxLength={17}
-            autoCapitalize="characters" autoCorrect="off" spellCheck={false} />
+            placeholder="Enter 17-character VIN" maxLength={17} autoCapitalize="characters" autoCorrect="off" spellCheck={false} />
           <div style={styles.vinCounter}>{vehicleInfo.vin.length}/17</div>
         </div>
-        <div style={styles.vinActions}>
-          <button onClick={() => setShowVinScanner(true)} style={styles.vinScanBtn}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/>
-            </svg>
-            Scan VIN with Camera
-          </button>
-          {vehicleInfo.vin.length > 0 && vehicleInfo.vin.length < 17 && (
-            <div style={styles.vinHint}>{17 - vehicleInfo.vin.length} more characters needed</div>
-          )}
-        </div>
-        {vinStatus === "decoded" && (
-          <div style={styles.vinSuccess}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-            VIN decoded — year &amp; make auto-filled
-          </div>
-        )}
-        {vinStatus === "partial" && (
-          <div style={styles.vinWarn}>VIN recognized but make not in database — fill manually</div>
-        )}
+        {vinStatus === "decoded" && <div style={styles.vinSuccess}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg> VIN decoded — year & make auto-filled</div>}
+        {vinStatus === "partial" && <div style={styles.vinWarn}>VIN recognized but make not in database — fill manually</div>}
       </div>
-
-      {/* VIN Scanner Modal */}
-      {showVinScanner && (
-        <VinScanner
-          onResult={(vin) => {
-            handleVinChange({ target: { value: vin } });
-            setShowVinScanner(false);
-          }}
-          onClose={() => setShowVinScanner(false)}
-        />
-      )}
-
       <div style={styles.vfGrid}>
-        <div style={styles.vfField}>
-          <label style={styles.vfLabel}>Year</label>
-          <select value={vehicleInfo.year} onChange={e => setField("year", e.target.value)}
-            style={styles.vfSelect}>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Year</label>
+          <select value={vehicleInfo.year} onChange={e => setField("year", e.target.value)} style={styles.vfSelect}>
             <option value="">Year</option>
             {VEHICLE_YEARS.map(y => <option key={y} value={y}>{y}</option>)}
           </select>
         </div>
-        <div style={styles.vfField}>
-          <label style={styles.vfLabel}>Make</label>
-          <SearchSelect items={VEHICLE_MAKES} value={vehicleInfo.make}
-            onChange={v => setField("make", v)} placeholder="Search make..." />
-        </div>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Make</label><SearchSelect items={VEHICLE_MAKES} value={vehicleInfo.make} onChange={v => setField("make", v)} placeholder="Search make..." /></div>
       </div>
-
       <div style={{ ...styles.vfGrid, gridTemplateColumns: "1fr", marginTop: 10 }}>
-        <div style={styles.vfField}>
-          <label style={styles.vfLabel}>Model</label>
-          {vehicleInfo.make ? (
-            <SearchSelect items={models} value={vehicleInfo.model}
-              onChange={v => setField("model", v)} placeholder="Search model..." />
-          ) : (
-            <input style={{ ...styles.vfInput, opacity: 0.4 }} placeholder="Select make first" disabled />
-          )}
+        <div style={styles.vfField}><label style={styles.vfLabel}>Model</label>
+          {vehicleInfo.make
+            ? <SearchSelect items={models} value={vehicleInfo.model} onChange={v => setField("model", v)} placeholder="Search model..." />
+            : <input style={{ ...styles.vfInput, opacity: 0.4 }} placeholder="Select make first" disabled />}
         </div>
       </div>
-
       <button onClick={onClose} style={styles.vfDone}>Done</button>
     </div>
   );
 }
 
-// ─── MAIN APP ───────────────────────────────────────────────────────────────
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
 function HailEstimator() {
-  const [view, setView] = useState("estimate"); // estimate | review
+  const [view, setView] = useState("estimate");
   const [selectedPanel, setSelectedPanel] = useState(null);
   const [panelData, setPanelData] = useState({});
   const [photos, setPhotos] = useState([]);
-  const [vehicleInfo, setVehicleInfo] = useState({ owner: "", year: "", make: "", model: "", vin: "", claim: "" });
+  const [vehicleInfo, setVehicleInfo] = useState({ owner:"",year:"",make:"",model:"",vin:"",claim:"" });
   const [showVehicleForm, setShowVehicleForm] = useState(false);
   const [emailTo, setEmailTo] = useState("");
   const [showEmailDone, setShowEmailDone] = useState(false);
-  const [showStartOverConfirm, setShowStartOverConfirm] = useState(false);
+  // Auth
+  const [user, setUser] = useState(null);
+  const [showAuth, setShowAuth] = useState(false);
+  const [showSaved, setShowSaved] = useState(false);
+  const [currentEstimateId, setCurrentEstimateId] = useState(null);
+  const [saveStatus, setSaveStatus] = useState("idle");
+  const autoSaveTimer = useRef(null);
+  // Carrier
+  const [carrierId, setCarrierId] = useState("state_farm");
+  const activeCarrier = CARRIERS.find(c => c.id === carrierId) || CARRIERS[0];
 
-  const handleSavePanel = useCallback((panel, data) => {
-    setPanelData(prev => ({ ...prev, [panel]: data }));
+  // Auth bootstrap
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => setUser(session?.user ?? null));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => setUser(session?.user ?? null));
+    return () => subscription.unsubscribe();
   }, []);
 
-  const handleDeletePanel = useCallback((panel) => {
-    setPanelData(prev => { const n = { ...prev }; delete n[panel]; return n; });
-  }, []);
+  // Auto-save on change
+  useEffect(() => {
+    if (!user) return;
+    const active = Object.entries(panelData).filter(([,d]) => d.count>0||d.rrEnabled||d.convEnabled);
+    if (active.length===0 && !vehicleInfo.owner && !vehicleInfo.vin) return;
+    clearTimeout(autoSaveTimer.current);
+    setSaveStatus("saving");
+    autoSaveTimer.current = setTimeout(async () => {
+      try {
+        const total = active.reduce((s,[,d]) => s+d.totalPrice, 0);
+        const payload = { user_id:user.id, vehicle_info:vehicleInfo, panel_data:panelData, grand_total:total, carrier_id:carrierId, panel_count:active.length, updated_at:new Date().toISOString() };
+        if (currentEstimateId) {
+          await supabase.from("estimates").update(payload).eq("id", currentEstimateId);
+        } else {
+          const { data } = await supabase.from("estimates").insert({...payload, created_at:new Date().toISOString()}).select("id").single();
+          if (data?.id) setCurrentEstimateId(data.id);
+        }
+        setSaveStatus("saved"); setTimeout(() => setSaveStatus("idle"), 2500);
+      } catch { setSaveStatus("error"); }
+    }, 1500);
+  }, [panelData, vehicleInfo, carrierId, user]);
 
-  const activePanels = Object.entries(panelData).filter(([, d]) => d.count > 0 || d.rrEnabled || d.convEnabled);
-  const grandTotal = activePanels.reduce((s, [, d]) => s + d.totalPrice, 0);
-  const totalDents = activePanels.reduce((s, [, d]) => s + ((d.rrEnabled || d.convEnabled) ? 0 : (d.count || 0)), 0);
+  const handleSavePanel = useCallback((panel, data) => setPanelData(prev => ({...prev,[panel]:data})), []);
+  const handleDeletePanel = useCallback((panel) => setPanelData(prev => { const n={...prev}; delete n[panel]; return n; }), []);
+  const handleSignOut = async () => { await supabase.auth.signOut(); setUser(null); };
+  const handleLoadEstimate = (est) => {
+    setVehicleInfo(est.vehicle_info||{owner:"",year:"",make:"",model:"",vin:"",claim:""});
+    setPanelData(est.panel_data||{}); setCarrierId(est.carrier_id||"state_farm");
+    setCurrentEstimateId(est.id); setShowSaved(false); setView("estimate");
+  };
+  const handleNewEstimate = () => { setPanelData({}); setVehicleInfo({owner:"",year:"",make:"",model:"",vin:"",claim:""}); setCurrentEstimateId(null); setCarrierId("state_farm"); };
+
+  const activePanels = Object.entries(panelData).filter(([,d]) => d.count>0||d.rrEnabled||d.convEnabled);
+  const grandTotal = activePanels.reduce((s,[,d]) => s+d.totalPrice, 0);
+  const totalDents = activePanels.reduce((s,[,d]) => s+((d.rrEnabled||d.convEnabled)?0:(d.count||0)), 0);
 
   const handleDownloadReport = () => {
-    const html = generateReportHTML(vehicleInfo, panelData, photos, grandTotal);
-    const blob = new Blob([html], { type: "text/html" });
+    const html = generateReportHTML(vehicleInfo, panelData, photos, grandTotal, activeCarrier.label);
+    const blob = new Blob([html],{type:"text/html"});
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url;
-    a.download = `HailScope_Estimate_${[vehicleInfo.year, vehicleInfo.make, vehicleInfo.model].filter(Boolean).join("_") || "Report"}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    a.href=url; a.download=`NTXHail_Estimate_${[vehicleInfo.year,vehicleInfo.make,vehicleInfo.model].filter(Boolean).join("_")||"Report"}.html`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   };
-
   const handlePrint = () => {
-    const html = generateReportHTML(vehicleInfo, panelData, photos, grandTotal);
+    const html = generateReportHTML(vehicleInfo, panelData, photos, grandTotal, activeCarrier.label);
     try {
-      // Try iframe print (works in most environments)
       const iframe = document.createElement("iframe");
-      iframe.style.position = "fixed";
-      iframe.style.top = "-10000px";
-      iframe.style.left = "-10000px";
-      iframe.style.width = "800px";
-      iframe.style.height = "600px";
+      iframe.style.cssText="position:fixed;top:-10000px;left:-10000px;width:800px;height:600px;";
       document.body.appendChild(iframe);
-      iframe.contentDocument.open();
-      iframe.contentDocument.write(html);
-      iframe.contentDocument.close();
-      iframe.onload = () => {
-        try {
-          iframe.contentWindow.print();
-        } catch (e) {
-          // If print fails, fall back to download
-          handleDownloadReport();
-        }
-        setTimeout(() => document.body.removeChild(iframe), 1000);
-      };
-      // Trigger load manually if already loaded
-      setTimeout(() => {
-        try { iframe.contentWindow.print(); } catch(e) {}
-        setTimeout(() => {
-          try { document.body.removeChild(iframe); } catch(e) {}
-        }, 1000);
-      }, 500);
-    } catch (e) {
-      // Final fallback: download the file
-      handleDownloadReport();
-    }
+      iframe.contentDocument.open(); iframe.contentDocument.write(html); iframe.contentDocument.close();
+      setTimeout(() => { try{iframe.contentWindow.print();}catch(e){handleDownloadReport();} setTimeout(()=>{try{document.body.removeChild(iframe);}catch(e){}},1000); },500);
+    } catch(e) { handleDownloadReport(); }
   };
-
   const handleEmail = () => {
-    const subject = encodeURIComponent(`Hail Damage Estimate — ${[vehicleInfo.year, vehicleInfo.make, vehicleInfo.model].filter(Boolean).join(" ") || "Vehicle"} — $${grandTotal.toLocaleString()}`);
-    const body = encodeURIComponent(
-      `Hail Damage Estimate Summary\n\n` +
-      `Owner: ${vehicleInfo.owner || "N/A"}\nVehicle: ${[vehicleInfo.year, vehicleInfo.make, vehicleInfo.model].filter(Boolean).join(" ") || "N/A"}\nVIN: ${vehicleInfo.vin || "N/A"}\nClaim #: ${vehicleInfo.claim || "N/A"}\n\n` +
-      `Panels:\n` + activePanels.map(([k, d]) => `  ${PANEL_LABELS[k]}: ${d.rrEnabled ? "R&R" : d.convEnabled ? "Conv." : `${d.selectedRange || d.count} ${DENT_SIZE_LABELS[d.size].toLowerCase()} dents`} — $${d.totalPrice.toLocaleString()}`).join("\n") +
-      `\n\nGRAND TOTAL: $${grandTotal.toLocaleString()}\n\n— Generated by HailScope Estimator`
-    );
-    window.open(`mailto:${emailTo}?subject=${subject}&body=${body}`, "_self");
-    setShowEmailDone(true);
-    setTimeout(() => setShowEmailDone(false), 3000);
+    const subject = encodeURIComponent(`Hail Damage Estimate — ${[vehicleInfo.year,vehicleInfo.make,vehicleInfo.model].filter(Boolean).join(" ")||"Vehicle"} — $${grandTotal.toLocaleString()}`);
+    const body = encodeURIComponent(`Carrier: ${activeCarrier.label}\nOwner: ${vehicleInfo.owner||"N/A"}\nVehicle: ${[vehicleInfo.year,vehicleInfo.make,vehicleInfo.model].filter(Boolean).join(" ")||"N/A"}\nVIN: ${vehicleInfo.vin||"N/A"}\nClaim #: ${vehicleInfo.claim||"N/A"}\n\n`+activePanels.map(([k,d])=>`  ${PANEL_LABELS[k]}: ${d.rrEnabled?"R&R":d.convEnabled?"Conv.":`${d.selectedRange||d.count} ${DENT_SIZE_LABELS[d.size].toLowerCase()} dents`} — $${d.totalPrice.toLocaleString()}`).join("\n")+`\n\nGRAND TOTAL: $${grandTotal.toLocaleString()}\n\n— NTX Hail | ntxhail.com`);
+    window.open(`mailto:${emailTo}?subject=${subject}&body=${body}`,"_self");
+    setShowEmailDone(true); setTimeout(()=>setShowEmailDone(false),3000);
   };
 
-  const handleStartOver = () => {
-    setShowStartOverConfirm(true);
-  };
-
-  const confirmStartOver = () => {
-    setPanelData({});
-    setPhotos([]);
-    setVehicleInfo({ owner: "", year: "", make: "", model: "", vin: "", claim: "" });
-    setEmailTo("");
-    setShowVehicleForm(false);
-    setSelectedPanel(null);
-    setShowStartOverConfirm(false);
-    setView("estimate");
-  };
+  const S = styles;
+  const saveIndicator = saveStatus==="saving"?{text:"Saving…",color:"#94a3b8"}:saveStatus==="saved"?{text:"✓ Saved",color:"#16a34a"}:saveStatus==="error"?{text:"⚠ Error",color:"#dc2626"}:null;
 
   return (
-    <div style={styles.app}>
-      {/* ── HEADER ── */}
-      <header style={styles.header}>
-        <div style={styles.headerLeft}>
-          <div style={styles.logo}>
-            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2.5">
-              <circle cx="12" cy="12" r="10" /><path d="M12 8v4l3 3" />
+    <div style={S.app}>
+      {/* HEADER */}
+      <header style={S.header}>
+        <div style={S.headerLeft}>
+          <div style={S.logo}>
+            <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+              <rect width="28" height="28" rx="5" fill="#0a1628"/>
+              <text x="4" y="19" fontFamily="sans-serif" fontWeight="900" fontSize="13" fill="white">NTX</text>
+              <polygon points="20,6 24,14 20,22 16,14" fill="#dc2626"/>
             </svg>
-            <span style={styles.logoText}>HailScope</span>
-          </div>
-          <div style={styles.headerMeta}>State Farm Matrix</div>
-        </div>
-        <button onClick={() => setShowVehicleForm(v => !v)} style={styles.vehicleBtn}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/>
-          </svg>
-          <span style={styles.vehicleBtnLabel}>Customer</span>
-        </button>
-      </header>
-
-      {/* Customer info preview bar */}
-      {(vehicleInfo.owner || vehicleInfo.year || vehicleInfo.make) && !showVehicleForm && (
-        <button onClick={() => setShowVehicleForm(true)} style={styles.customerBar}>
-          <div style={styles.customerBarLeft}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round">
-              <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/>
-            </svg>
-            <div style={styles.customerBarText}>
-              <span style={styles.customerBarName}>{vehicleInfo.owner || "No owner"}</span>
-              <span style={styles.customerBarVehicle}>
-                {[vehicleInfo.year, vehicleInfo.make, vehicleInfo.model].filter(Boolean).join(" ") || "No vehicle info"}
-                {vehicleInfo.claim ? ` • #${vehicleInfo.claim}` : ""}
-              </span>
+            <div>
+              <div style={S.logoText}>HAILSPEC</div>
+              <div style={S.logoSub}>by NTX Hail</div>
             </div>
           </div>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#64748b" strokeWidth="2" strokeLinecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+          {user && saveIndicator && <div style={{fontSize:11,fontWeight:600,color:saveIndicator.color,letterSpacing:"0.2px"}}>{saveIndicator.text}</div>}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          {user ? (
+            <>
+              <button onClick={()=>setShowSaved(true)} style={{...S.vehicleBtn,fontSize:11,padding:"5px 10px"}}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+                Saved
+              </button>
+              <button onClick={handleNewEstimate} style={{...S.vehicleBtn,fontSize:11,padding:"5px 10px"}}>+ New</button>
+              <button onClick={handleSignOut} style={{...S.vehicleBtn,fontSize:11,padding:"5px 10px",borderColor:"rgba(220,38,38,0.35)",color:"#ef4444"}}>Out</button>
+            </>
+          ) : (
+            <button onClick={()=>setShowAuth(true)} style={S.vehicleBtn}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              Sign In
+            </button>
+          )}
+        </div>
+      </header>
+
+      <div style={S.accentBar}/>
+
+      {/* Customer bar */}
+      {(vehicleInfo.owner||vehicleInfo.year||vehicleInfo.make)&&!showVehicleForm&&(
+        <button onClick={()=>setShowVehicleForm(true)} style={S.customerBar}>
+          <div style={S.customerBarLeft}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2563eb" strokeWidth="2" strokeLinecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            <div style={S.customerBarText}>
+              <span style={S.customerBarName}>{vehicleInfo.owner||"No owner"}</span>
+              <span style={S.customerBarVehicle}>{[vehicleInfo.year,vehicleInfo.make,vehicleInfo.model].filter(Boolean).join(" ")||"No vehicle"}{vehicleInfo.claim?` • #${vehicleInfo.claim}`:""}</span>
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:11,fontWeight:700,color:activeCarrier.color,background:activeCarrier.color+"18",padding:"2px 8px",borderRadius:6,border:`1px solid ${activeCarrier.color}33`}}>{activeCarrier.label}</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
         </button>
       )}
 
-      {/* ── VEHICLE INFO FORM ── */}
-      {showVehicleForm && (
-        <VehicleForm vehicleInfo={vehicleInfo} setVehicleInfo={setVehicleInfo} onClose={() => setShowVehicleForm(false)} />
+      {showVehicleForm&&<VehicleForm vehicleInfo={vehicleInfo} setVehicleInfo={setVehicleInfo} onClose={()=>setShowVehicleForm(false)}/>}
+
+      {/* CARRIER SELECTOR */}
+      <div style={S.carrierBar}>
+        <div style={S.carrierBarLabel}>CARRIER</div>
+        <div style={S.carrierScroll}>
+          {CARRIERS.map(c => {
+            const isActive = carrierId===c.id;
+            const hasMatrix = c.id==="state_farm"||CARRIER_MATRICES[c.id]!==null;
+            return (
+              <button key={c.id} onClick={()=>{setCarrierId(c.id);setPanelData({});}}
+                style={{...S.carrierChip,...(isActive?{background:c.color,color:"#fff",borderColor:c.color,boxShadow:`0 2px 8px ${c.color}40`}:{}),...(!hasMatrix&&!isActive?{opacity:0.55}:{})}}>
+                {c.label}{!hasMatrix&&!isActive&&<span style={{fontSize:8,marginLeft:3,opacity:0.6}}>▸fill</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {carrierId!=="state_farm"&&!CARRIER_MATRICES[carrierId]&&(
+        <div style={S.carrierStubBanner}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span><strong>{activeCarrier.label}</strong> matrix not yet populated — all panels show $0 / R&R recommended until filled in.</span>
+        </div>
       )}
 
-      {/* ── TAB NAVIGATION ── */}
-      <div style={styles.tabs}>
-        <button onClick={() => setView("estimate")} style={{ ...styles.tab, ...(view === "estimate" ? styles.tabActive : {}) }}>
-          Estimate
-        </button>
-        <button onClick={() => setView("review")} style={{ ...styles.tab, ...(view === "review" ? styles.tabActive : {}) }}>
-          Review & Export
-          {activePanels.length > 0 && <span style={styles.badge}>{activePanels.length}</span>}
+      {/* TABS */}
+      <div style={S.tabs}>
+        <button onClick={()=>setView("estimate")} style={{...S.tab,...(view==="estimate"?S.tabActive:{})}}>Estimate</button>
+        <button onClick={()=>setView("review")} style={{...S.tab,...(view==="review"?S.tabActive:{})}}>
+          Review & Export{activePanels.length>0&&<span style={S.badge}>{activePanels.length}</span>}
         </button>
       </div>
 
-      {/* ── ESTIMATE VIEW ── */}
-      {view === "estimate" && (
-        <div style={styles.body}>
-          {/* Stats strip */}
-          <div style={styles.statsStrip}>
-            <div style={styles.stat}>
-              <div style={styles.statVal}>{activePanels.length}</div>
-              <div style={styles.statLabel}>Panels</div>
+      {/* ESTIMATE VIEW */}
+      {view==="estimate"&&(
+        <div style={S.body}>
+          {!user&&(
+            <div style={S.signInNudge}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2563eb" strokeWidth="2" strokeLinecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              <span><button onClick={()=>setShowAuth(true)} style={{background:"none",border:"none",color:"#2563eb",fontWeight:700,cursor:"pointer",fontSize:"inherit",padding:0}}>Sign in</button> to auto-save estimates to your account.</span>
             </div>
-            <div style={styles.stat}>
-              <div style={styles.statVal}>{totalDents}</div>
-              <div style={styles.statLabel}>Dents</div>
-            </div>
-            <div style={styles.stat}>
-              <div style={{ ...styles.statVal, color: "#f59e0b" }}>${grandTotal.toLocaleString()}</div>
-              <div style={styles.statLabel}>Total</div>
-            </div>
+          )}
+          <div style={S.statsStrip}>
+            <div style={S.stat}><div style={S.statVal}>{activePanels.length}</div><div style={S.statLabel}>Panels</div></div>
+            <div style={S.stat}><div style={S.statVal}>{totalDents}</div><div style={S.statLabel}>Dents</div></div>
+            <div style={S.stat}><div style={{...S.statVal,color:"#2563eb"}}>${grandTotal.toLocaleString()}</div><div style={S.statLabel}>Total</div></div>
           </div>
-
-          {/* Car diagram */}
-          <div style={styles.carSection}>
-            <div style={styles.sectionLabel}>TAP A PANEL TO ADD DAMAGE</div>
-            <CarSilhouette panelData={panelData} selectedPanel={selectedPanel}
-              onSelectPanel={(p) => setSelectedPanel(p)} />
-            {/* Legend */}
-            <div style={styles.legend}>
-              {[["None", "rgba(200,210,220,0.3)"], ["Low", "rgba(52,211,153,0.55)"], ["Med", "rgba(251,191,36,0.6)"], ["High", "rgba(251,146,60,0.7)"], ["Severe", "rgba(239,68,68,0.75)"]].map(([l, c]) => (
-                <div key={l} style={styles.legendItem}>
-                  <div style={{ ...styles.legendDot, background: c }} />
-                  <span>{l}</span>
-                </div>
+          <div style={S.carSection}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <div style={S.sectionLabel}>TAP A PANEL TO ADD DAMAGE</div>
+              <button onClick={()=>setShowVehicleForm(v=>!v)} style={{fontSize:11,fontWeight:700,color:"#2563eb",background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:6,padding:"4px 10px",cursor:"pointer"}}>+ Customer</button>
+            </div>
+            <CarSilhouette panelData={panelData} selectedPanel={selectedPanel} onSelectPanel={p=>setSelectedPanel(p)}/>
+            <div style={S.legend}>
+              {[["None","#f1f5f9"],["Low","rgba(37,99,235,0.35)"],["Med","rgba(59,130,246,0.5)"],["High","rgba(249,115,22,0.55)"],["Severe","rgba(220,38,38,0.65)"]].map(([l,c])=>(
+                <div key={l} style={S.legendItem}><div style={{...S.legendDot,background:c,border:"1px solid #e2e8f0"}}/><span>{l}</span></div>
               ))}
             </div>
           </div>
-
-          {/* Camera */}
-          <div style={styles.section}>
-            <div style={styles.sectionLabel}>PHOTOS</div>
-            <CameraCapture photos={photos} setPhotos={setPhotos} />
-          </div>
-
-          {/* Active panels list */}
-          {activePanels.length > 0 && (
-            <div style={styles.section}>
-              <div style={styles.sectionLabel}>DAMAGE LOG</div>
-              {activePanels.map(([key, d]) => (
-                <button key={key} onClick={() => setSelectedPanel(key)} style={styles.logItem}>
+          <div style={S.section}><div style={S.sectionLabel}>PHOTOS</div><CameraCapture photos={photos} setPhotos={setPhotos}/></div>
+          {activePanels.length>0&&(
+            <div style={S.section}>
+              <div style={S.sectionLabel}>DAMAGE LOG</div>
+              {activePanels.map(([key,d])=>(
+                <button key={key} onClick={()=>setSelectedPanel(key)} style={S.logItem}>
                   <div>
-                    <div style={styles.logPanel}>{PANEL_LABELS[key]}</div>
-                    <div style={styles.logMeta}>{d.rrEnabled ? "R&R — Remove & Replace" : d.convEnabled ? "Conventional Repair" : `${d.selectedRange || d.count} ${DENT_SIZE_LABELS[d.size].toLowerCase()} dents${(d.addons || []).length > 0 ? " • add-on" : ""}`}{d.riEnabled ? " • R&I" : ""}</div>
+                    <div style={S.logPanel}>{PANEL_LABELS[key]}</div>
+                    <div style={S.logMeta}>{d.rrEnabled?"R&R — Remove & Replace":d.convEnabled?"Conventional Repair":`${d.selectedRange||d.count} ${DENT_SIZE_LABELS[d.size].toLowerCase()} dents${(d.addons||[]).length>0?" • add-on":""}`}{d.riEnabled?" • R&I":""}</div>
                   </div>
-                  <div style={styles.logPrice}>${d.totalPrice.toLocaleString()}</div>
+                  <div style={S.logPrice}>${d.totalPrice.toLocaleString()}</div>
                 </button>
               ))}
             </div>
@@ -1746,151 +1428,97 @@ function HailEstimator() {
         </div>
       )}
 
-      {/* ── REVIEW & EXPORT VIEW ── */}
-      {view === "review" && (
-        <div style={styles.body}>
-          {activePanels.length === 0 ? (
-            <div style={styles.emptyState}>
-              <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>No panels estimated yet</div>
-              <div style={{ color: "#64748b", fontSize: 14 }}>Tap panels on the car diagram to begin.</div>
+      {/* REVIEW VIEW */}
+      {view==="review"&&(
+        <div style={S.body}>
+          {activePanels.length===0?(
+            <div style={S.emptyState}>
+              <div style={{fontSize:40,marginBottom:12}}>📋</div>
+              <div style={{fontWeight:600,marginBottom:4}}>No panels estimated yet</div>
+              <div style={{color:"#94a3b8",fontSize:14}}>Tap panels on the car diagram to begin.</div>
             </div>
-          ) : (
+          ):(
             <>
-              {/* Summary card */}
-              <div style={styles.reviewCard}>
-                <div style={styles.reviewHeader}>
+              <div style={S.reviewCard}>
+                <div style={S.reviewHeader}>
                   <div>
-                    <div style={styles.reviewTitle}>Estimate Summary</div>
-                    <div style={styles.reviewMeta}>
-                      {vehicleInfo.year || vehicleInfo.make ? `${vehicleInfo.year} ${vehicleInfo.make} ${vehicleInfo.model}`.trim() : "No vehicle info"}
-                      {vehicleInfo.claim ? ` • Claim #${vehicleInfo.claim}` : ""}
-                    </div>
+                    <div style={S.reviewTitle}>Estimate Summary</div>
+                    <div style={S.reviewMeta}>{vehicleInfo.year||vehicleInfo.make?`${vehicleInfo.year} ${vehicleInfo.make} ${vehicleInfo.model}`.trim():"No vehicle info"}{vehicleInfo.claim?` • #${vehicleInfo.claim}`:""}</div>
+                    <div style={{marginTop:5,display:"inline-block",fontSize:11,fontWeight:700,color:activeCarrier.color,background:activeCarrier.color+"15",padding:"2px 9px",borderRadius:6,border:`1px solid ${activeCarrier.color}30`}}>{activeCarrier.label}</div>
                   </div>
-                  <div style={styles.grandTotal}>${grandTotal.toLocaleString()}</div>
+                  <div style={S.grandTotal}>${grandTotal.toLocaleString()}</div>
                 </div>
-
-                <div style={styles.reviewTable}>
-                  <div style={styles.rtHead}>
-                    <span style={{ flex: 2 }}>Panel</span>
-                    <span style={{ flex: 1, textAlign: "center" }}>Dents</span>
-                    <span style={{ flex: 1, textAlign: "center" }}>Size</span>
-                    <span style={{ flex: 1, textAlign: "center" }}>R&I</span>
-                    <span style={{ flex: 1, textAlign: "right" }}>Cost</span>
+                <div style={S.reviewTable}>
+                  <div style={S.rtHead}>
+                    <span style={{flex:2}}>Panel</span><span style={{flex:1,textAlign:"center"}}>Dents</span>
+                    <span style={{flex:1,textAlign:"center"}}>Size</span><span style={{flex:1,textAlign:"center"}}>R&I</span>
+                    <span style={{flex:1,textAlign:"right"}}>Cost</span>
                   </div>
-                  {activePanels.map(([key, d]) => {
-                    const isNonPdr = d.rrEnabled || d.convEnabled;
-                    const modeLabel = d.rrEnabled ? "R&R" : d.convEnabled ? "Conv." : null;
-                    const modeColor = d.rrEnabled ? "#ef4444" : d.convEnabled ? "#fb923c" : undefined;
-                    const modeHours = d.rrEnabled ? d.rrHours : d.convEnabled ? d.convHours : 0;
-                    return (
-                    <div key={key} style={styles.rtRow}>
-                      <span style={{ flex: 2, fontWeight: 500 }}>{PANEL_LABELS[key]}{isNonPdr ? " ✱" : ""}</span>
-                      <span style={{ flex: 1, textAlign: "center", color: modeColor }}>{modeLabel || (d.selectedRange || d.count)}</span>
-                      <span style={{ flex: 1, textAlign: "center", fontSize: 12 }}>{isNonPdr ? `${(modeHours || 0).toFixed(1)}hrs` : DENT_SIZE_LABELS[d.size]}</span>
-                      <span style={{ flex: 1, textAlign: "center", fontSize: 12, color: d.riEnabled ? "#38bdf8" : "#475569" }}>{d.riEnabled ? `$${(d.riTotalCost || 0).toFixed(0)}` : "—"}</span>
-                      <span style={{ flex: 1, textAlign: "right", fontWeight: 600 }}>${d.totalPrice.toLocaleString()}</span>
-                    </div>
-                    );
+                  {activePanels.map(([key,d])=>{
+                    const np=d.rrEnabled||d.convEnabled;
+                    const ml=d.rrEnabled?"R&R":d.convEnabled?"Conv.":null;
+                    const mc=d.rrEnabled?"#ef4444":d.convEnabled?"#f97316":undefined;
+                    const mh=d.rrEnabled?d.rrHours:d.convEnabled?d.convHours:0;
+                    return(<div key={key} style={S.rtRow}>
+                      <span style={{flex:2,fontWeight:500}}>{PANEL_LABELS[key]}{np?" ✱":""}</span>
+                      <span style={{flex:1,textAlign:"center",color:mc}}>{ml||(d.selectedRange||d.count)}</span>
+                      <span style={{flex:1,textAlign:"center",fontSize:12}}>{np?`${(mh||0).toFixed(1)}hrs`:DENT_SIZE_LABELS[d.size]}</span>
+                      <span style={{flex:1,textAlign:"center",fontSize:12,color:d.riEnabled?"#2563eb":"#94a3b8"}}>{d.riEnabled?`$${(d.riTotalCost||0).toFixed(0)}`:"—"}</span>
+                      <span style={{flex:1,textAlign:"right",fontWeight:600}}>${d.totalPrice.toLocaleString()}</span>
+                    </div>);
                   })}
-                  <div style={styles.rtTotal}>
-                    <span style={{ flex: 2 }}>Grand Total</span>
-                    <span style={{ flex: 1, textAlign: "center" }}>{totalDents}</span>
-                    <span style={{ flex: 1 }}></span>
-                    <span style={{ flex: 1 }}></span>
-                    <span style={{ flex: 1, textAlign: "right" }}>${grandTotal.toLocaleString()}</span>
+                  <div style={S.rtTotal}>
+                    <span style={{flex:2}}>Grand Total</span><span style={{flex:1,textAlign:"center"}}>{totalDents}</span>
+                    <span style={{flex:1}}/><span style={{flex:1}}/>
+                    <span style={{flex:1,textAlign:"right"}}>${grandTotal.toLocaleString()}</span>
                   </div>
                 </div>
               </div>
-
-              {/* Export actions */}
-              <div style={styles.section}>
-                <div style={styles.sectionLabel}>EXPORT</div>
-                <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-                  <button onClick={handlePrint} style={{ ...styles.exportBtn, flex: 1, marginBottom: 0 }}>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <polyline points="6 9 6 2 18 2 18 9" /><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2" /><rect x="6" y="14" width="12" height="8" />
-                    </svg>
-                    <span>Print</span>
+              <div style={S.section}>
+                <div style={S.sectionLabel}>EXPORT</div>
+                <div style={{display:"flex",gap:8,marginBottom:10}}>
+                  <button onClick={handlePrint} style={{...S.exportBtn,flex:1,marginBottom:0}}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+                    Print
                   </button>
-                  <button onClick={handleDownloadReport} style={{ ...styles.exportBtn, flex: 1, marginBottom: 0 }}>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-                    </svg>
-                    <span>Download</span>
+                  <button onClick={handleDownloadReport} style={{...S.exportBtn,flex:1,marginBottom:0}}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Download
                   </button>
                 </div>
-
-                <div style={styles.emailRow}>
-                  <input type="email" placeholder="recipient@email.com" value={emailTo}
-                    onChange={e => setEmailTo(e.target.value)} style={styles.emailInput} />
-                  <button onClick={handleEmail} disabled={!emailTo} style={{ ...styles.emailBtn, opacity: emailTo ? 1 : 0.4 }}>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" /><polyline points="22,6 12,13 2,6" />
-                    </svg>
+                <div style={S.emailRow}>
+                  <input type="email" placeholder="recipient@email.com" value={emailTo} onChange={e=>setEmailTo(e.target.value)} style={S.emailInput}/>
+                  <button onClick={handleEmail} disabled={!emailTo} style={{...S.emailBtn,opacity:emailTo?1:0.4}}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
                     Email
                   </button>
                 </div>
-                {showEmailDone && <div style={styles.emailSuccess}>✓ Email client opened</div>}
+                {showEmailDone&&<div style={S.emailSuccess}>✓ Email client opened</div>}
               </div>
-
-              {/* Photos in review */}
-              {photos.length > 0 && (
-                <div style={styles.section}>
-                  <div style={styles.sectionLabel}>ATTACHED PHOTOS ({photos.length})</div>
-                  <div style={styles.photoGrid}>
-                    {photos.map((p, i) => (
-                      <img key={i} src={p.url} alt={p.name} style={styles.reviewPhoto} />
-                    ))}
-                  </div>
+              {photos.length>0&&(
+                <div style={S.section}>
+                  <div style={S.sectionLabel}>ATTACHED PHOTOS ({photos.length})</div>
+                  <div style={S.photoGrid}>{photos.map((p,i)=><img key={i} src={p.url} alt={p.name} style={S.reviewPhoto}/>)}</div>
                 </div>
               )}
-
-              {/* Start Over */}
-              <button onClick={handleStartOver} style={styles.startOverBtn}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 105.28-12.49L1 10"/>
-                </svg>
-                Start Over
-              </button>
             </>
           )}
         </div>
       )}
 
-      {/* ── PANEL EDITOR MODAL ── */}
-      {selectedPanel && (
-        <PanelEditor panel={selectedPanel} data={panelData[selectedPanel]}
-          onSave={handleSavePanel} onDelete={handleDeletePanel}
-          onClose={() => setSelectedPanel(null)} />
-      )}
-
-      {/* ── START OVER CONFIRM ── */}
-      {showStartOverConfirm && (
-        <div style={styles.startOverOverlay}>
-          <div style={styles.startOverModal}>
-            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round">
-              <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-            </svg>
-            <div style={styles.startOverTitle}>Start Over?</div>
-            <div style={styles.startOverDesc}>This will clear all panels, vehicle info, photos, and reset everything.</div>
-            <div style={styles.startOverBtns}>
-              <button onClick={() => setShowStartOverConfirm(false)} style={styles.startOverCancel}>Cancel</button>
-              <button onClick={confirmStartOver} style={styles.startOverConfirm}>Yes, Start Over</button>
-            </div>
-          </div>
-        </div>
-      )}
+      {selectedPanel&&<PanelEditor panel={selectedPanel} data={panelData[selectedPanel]} carrierId={carrierId} onSave={handleSavePanel} onDelete={handleDeletePanel} onClose={()=>setSelectedPanel(null)}/>}
+      {showAuth&&<AuthModal onAuth={u=>{setUser(u);setShowAuth(false);}} onClose={()=>setShowAuth(false)}/>}
+      {showSaved&&user&&<SavedEstimatesList user={user} onLoad={handleLoadEstimate} onClose={()=>setShowSaved(false)}/>}
     </div>
   );
 }
 
-// ─── STYLES ─────────────────────────────────────────────────────────────────
+// ─── STYLES — NTX HAIL LIGHT / WHITE THEME ──────────────────────────────────
 const styles = {
   app: {
     fontFamily: "'DM Sans', 'Segoe UI', system-ui, sans-serif",
-    background: "#0c1222",
-    color: "#e2e8f0",
+    background: "#f8fafc",
+    color: "#0f172a",
     minHeight: "100vh",
     maxWidth: 480,
     margin: "0 auto",
@@ -1898,606 +1526,313 @@ const styles = {
     overflowX: "hidden",
   },
   header: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "16px 20px",
-    background: "linear-gradient(135deg, #0f172a 0%, #1a2540 100%)",
-    borderBottom: "1px solid rgba(248,250,252,0.06)",
-    position: "sticky",
-    top: 0,
-    zIndex: 50,
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+    padding: "14px 18px",
+    background: "#0a1628",
+    borderBottom: "none",
+    position: "sticky", top: 0, zIndex: 50,
+    boxShadow: "0 2px 12px rgba(10,22,40,0.18)",
+  },
+  accentBar: {
+    height: 3,
+    background: "linear-gradient(90deg, #2563eb 0%, #3b82f6 50%, #dc2626 100%)",
   },
   headerLeft: { display: "flex", alignItems: "center", gap: 12 },
-  logo: { display: "flex", alignItems: "center", gap: 8 },
-  logoText: { fontWeight: 800, fontSize: 20, letterSpacing: "-0.5px", color: "#f8fafc" },
-  headerMeta: { fontSize: 11, color: "#64748b", fontWeight: 500, letterSpacing: "0.5px", background: "rgba(100,116,139,0.15)", padding: "3px 8px", borderRadius: 4 },
-  vehicleBtn: {
-    background: "rgba(245,158,11,0.08)", border: "1.5px solid rgba(245,158,11,0.25)", borderRadius: 10,
-    padding: "6px 14px", color: "#f59e0b", cursor: "pointer", display: "flex", alignItems: "center",
-    gap: 6, transition: "all 0.2s",
+  logo: { display: "flex", alignItems: "center", gap: 10 },
+  logoText: { fontWeight: 900, fontSize: 17, letterSpacing: "1.5px", color: "#ffffff", lineHeight: 1 },
+  logoSub: { fontSize: 9, color: "#93c5fd", fontWeight: 700, letterSpacing: "1px", textTransform: "uppercase" },
+  headerBadge: {
+    fontSize: 10, color: "#94a3b8", fontWeight: 600, letterSpacing: "0.5px",
+    background: "rgba(255,255,255,0.08)", padding: "3px 8px", borderRadius: 4,
+    border: "1px solid rgba(255,255,255,0.12)",
   },
-  vehicleBtnLabel: { fontSize: 12, fontWeight: 700, letterSpacing: "0.3px" },
+  vehicleBtn: {
+    background: "rgba(255,255,255,0.1)", border: "1.5px solid rgba(255,255,255,0.2)", borderRadius: 10,
+    padding: "6px 14px", color: "#ffffff", cursor: "pointer",
+    display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600,
+  },
   customerBar: {
     display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
-    background: "rgba(245,158,11,0.04)", border: "none",
-    borderBottom: "1px solid rgba(245,158,11,0.1)", padding: "10px 20px",
+    background: "#ffffff", border: "none",
+    borderBottom: "1px solid #e2e8f0", padding: "10px 18px",
     cursor: "pointer", textAlign: "left",
   },
   customerBarLeft: { display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 },
   customerBarText: { display: "flex", flexDirection: "column", gap: 1, minWidth: 0 },
-  customerBarName: { fontSize: 13, fontWeight: 700, color: "#f8fafc", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-  customerBarVehicle: { fontSize: 11, color: "#94a3b8", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  customerBarName: { fontSize: 13, fontWeight: 700, color: "#0f172a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  customerBarVehicle: { fontSize: 11, color: "#64748b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
   vehicleForm: {
-    background: "#111b2e", padding: "20px", borderBottom: "1px solid rgba(248,250,252,0.06)",
+    background: "#ffffff", padding: "20px", borderBottom: "1px solid #e2e8f0",
     maxHeight: "80vh", overflowY: "auto",
+    boxShadow: "0 4px 16px rgba(0,0,0,0.06)",
   },
-  vehicleFormTitle: { fontWeight: 700, fontSize: 15, marginBottom: 14, color: "#f8fafc" },
+  vehicleFormTitle: { fontWeight: 700, fontSize: 15, marginBottom: 14, color: "#0f172a" },
   vfGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 },
   vfField: {},
-  vfLabel: { display: "block", fontSize: 10, fontWeight: 600, color: "#64748b", letterSpacing: "0.5px", marginBottom: 4, textTransform: "uppercase" },
+  vfLabel: { display: "block", fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.5px", marginBottom: 4, textTransform: "uppercase" },
   vfInput: {
-    width: "100%", background: "#0c1222", border: "1px solid rgba(148,163,184,0.2)", borderRadius: 6,
-    padding: "8px 10px", color: "#e2e8f0", fontSize: 14, outline: "none",
+    width: "100%", background: "#f8fafc", border: "1.5px solid #e2e8f0", borderRadius: 8,
+    padding: "9px 12px", color: "#0f172a", fontSize: 14, outline: "none",
+  },
+  vfSelect: {
+    width: "100%", background: "#f8fafc", border: "1.5px solid #e2e8f0", borderRadius: 8,
+    padding: "9px 12px", color: "#0f172a", fontSize: 14, outline: "none", appearance: "auto",
   },
   vfDone: {
-    marginTop: 14, background: "#f59e0b", color: "#0f172a", border: "none", borderRadius: 8,
-    padding: "10px 24px", fontWeight: 700, fontSize: 14, cursor: "pointer", width: "100%",
+    marginTop: 14, background: "#2563eb", color: "#ffffff", border: "none", borderRadius: 8,
+    padding: "11px 24px", fontWeight: 700, fontSize: 14, cursor: "pointer", width: "100%",
+    boxShadow: "0 2px 8px rgba(37,99,235,0.3)",
   },
-  tabs: {
-    display: "flex", background: "#111b2e", borderBottom: "1px solid rgba(248,250,252,0.06)",
-  },
+  tabs: { display: "flex", background: "#ffffff", borderBottom: "1px solid #e2e8f0" },
   tab: {
     flex: 1, padding: "14px 8px", background: "none", border: "none", borderBottom: "2px solid transparent",
-    color: "#64748b", fontSize: 14, fontWeight: 600, cursor: "pointer", display: "flex",
-    alignItems: "center", justifyContent: "center", gap: 6, transition: "all 0.15s",
+    color: "#64748b", fontSize: 14, fontWeight: 600, cursor: "pointer",
+    display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
   },
-  tabActive: { color: "#f59e0b", borderBottomColor: "#f59e0b" },
+  tabActive: { color: "#2563eb", borderBottomColor: "#2563eb" },
   badge: {
-    background: "#f59e0b", color: "#0f172a", fontSize: 11, fontWeight: 800,
-    borderRadius: 10, padding: "1px 7px", marginLeft: 4,
+    background: "#2563eb", color: "#fff", fontSize: 11, fontWeight: 800,
+    borderRadius: 10, padding: "1px 7px",
   },
   body: { padding: "16px 16px 80px" },
-  statsStrip: {
-    display: "flex", gap: 8, marginBottom: 16,
-  },
+  statsStrip: { display: "flex", gap: 8, marginBottom: 16 },
   stat: {
-    flex: 1, background: "#111b2e", borderRadius: 10, padding: "14px 12px", textAlign: "center",
-    border: "1px solid rgba(248,250,252,0.04)",
+    flex: 1, background: "#ffffff", borderRadius: 12, padding: "14px 12px", textAlign: "center",
+    border: "1px solid #e2e8f0",
+    boxShadow: "0 1px 4px rgba(0,0,0,0.06)",
   },
-  statVal: { fontSize: 22, fontWeight: 800, color: "#f8fafc", letterSpacing: "-0.5px" },
-  statLabel: { fontSize: 10, fontWeight: 600, color: "#64748b", letterSpacing: "0.5px", textTransform: "uppercase", marginTop: 2 },
+  statVal: { fontSize: 22, fontWeight: 800, color: "#0f172a", letterSpacing: "-0.5px" },
+  statLabel: { fontSize: 10, fontWeight: 600, color: "#94a3b8", letterSpacing: "0.5px", textTransform: "uppercase", marginTop: 2 },
   carSection: {
-    background: "#111b2e", borderRadius: 14, padding: "16px 12px 12px", marginBottom: 16,
-    border: "1px solid rgba(248,250,252,0.04)",
+    background: "#ffffff", borderRadius: 14, padding: "16px 12px 12px", marginBottom: 16,
+    border: "1px solid #e2e8f0",
+    boxShadow: "0 1px 6px rgba(0,0,0,0.06)",
   },
-  sectionLabel: {
-    fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "1px", textTransform: "uppercase",
-    marginBottom: 12,
-  },
+  sectionLabel: { fontSize: 10, fontWeight: 700, color: "#94a3b8", letterSpacing: "1px", textTransform: "uppercase", marginBottom: 12 },
   legend: { display: "flex", justifyContent: "center", gap: 12, marginTop: 8 },
   legendItem: { display: "flex", alignItems: "center", gap: 4, fontSize: 10, color: "#94a3b8" },
   legendDot: { width: 10, height: 10, borderRadius: 3 },
   section: { marginBottom: 20 },
   cameraBtn: {
     display: "flex", alignItems: "center", justifyContent: "center", gap: 10, width: "100%",
-    background: "linear-gradient(135deg, #1e3a5f 0%, #1a2540 100%)", border: "1px dashed rgba(148,163,184,0.3)",
+    background: "#ffffff", border: "1.5px dashed #cbd5e1",
     borderRadius: 12, padding: "16px", color: "#94a3b8", fontSize: 15, fontWeight: 600, cursor: "pointer",
   },
   photoStrip: { display: "flex", gap: 8, marginTop: 10, overflowX: "auto", paddingBottom: 4 },
   photoThumb: { position: "relative", flexShrink: 0, width: 72, height: 72, borderRadius: 8, overflow: "hidden" },
   photoImg: { width: "100%", height: "100%", objectFit: "cover" },
   photoRemove: {
-    position: "absolute", top: 2, right: 2, background: "rgba(0,0,0,0.7)", border: "none",
+    position: "absolute", top: 2, right: 2, background: "rgba(0,0,0,0.55)", border: "none",
     borderRadius: "50%", width: 20, height: 20, color: "#fff", fontSize: 11, cursor: "pointer",
     display: "flex", alignItems: "center", justifyContent: "center",
   },
   logItem: {
     display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
-    background: "#111b2e", border: "1px solid rgba(248,250,252,0.04)", borderRadius: 10,
-    padding: "14px 16px", marginBottom: 8, cursor: "pointer", textAlign: "left",
-    color: "#e2e8f0",
+    background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 12,
+    padding: "14px 16px", marginBottom: 8, cursor: "pointer", textAlign: "left", color: "#0f172a",
+    boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
   },
-  logPanel: { fontWeight: 700, fontSize: 14 },
+  logPanel: { fontWeight: 700, fontSize: 14, color: "#0f172a" },
   logMeta: { fontSize: 12, color: "#64748b", marginTop: 2 },
-  logPrice: { fontWeight: 800, fontSize: 16, color: "#f59e0b" },
-
+  logPrice: { fontWeight: 800, fontSize: 16, color: "#2563eb" },
   // Modal
   modalOverlay: {
     position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
-    background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)",
+    background: "rgba(15,23,42,0.5)", backdropFilter: "blur(6px)",
     zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center",
   },
   modalContent: {
-    background: "#111b2e", borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 480,
+    background: "#ffffff", borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 480,
     maxHeight: "92vh", display: "flex", flexDirection: "column",
-    border: "1px solid rgba(248,250,252,0.06)",
+    borderTop: "3px solid #2563eb",
+    boxShadow: "0 -4px 32px rgba(0,0,0,0.12)",
   },
   modalHeader: {
     display: "flex", alignItems: "center", justifyContent: "space-between",
-    padding: "20px 20px 16px", borderBottom: "1px solid rgba(248,250,252,0.06)",
+    padding: "20px 20px 16px", borderBottom: "1px solid #f1f5f9",
   },
-  modalTitle: { fontWeight: 800, fontSize: 18, color: "#f8fafc" },
-  modalSubtitle: { fontSize: 12, color: "#64748b", marginTop: 2 },
+  modalTitle: { fontWeight: 800, fontSize: 18, color: "#0f172a" },
+  modalSubtitle: { fontSize: 12, color: "#94a3b8", marginTop: 2 },
   closeBtn: {
-    background: "rgba(148,163,184,0.1)", border: "none", borderRadius: 8,
-    width: 36, height: 36, color: "#94a3b8", fontSize: 18, cursor: "pointer",
+    background: "#f1f5f9", border: "none", borderRadius: 8,
+    width: 36, height: 36, color: "#64748b", fontSize: 18, cursor: "pointer",
     display: "flex", alignItems: "center", justifyContent: "center",
   },
-  modalBody: { padding: "20px", overflowY: "auto", flex: 1 },
-  repairToggles: {
-    display: "flex", gap: 8, marginBottom: 16,
-  },
+  modalBody: { padding: "20px", overflowY: "auto", flex: 1, background: "#ffffff" },
+  repairToggles: { display: "flex", gap: 8, marginBottom: 16 },
   repairToggleBtn: {
     flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-    background: "rgba(148,163,184,0.04)", border: "1.5px solid rgba(148,163,184,0.12)",
+    background: "#f8fafc", border: "1.5px solid #e2e8f0",
     borderRadius: 10, padding: "12px 10px", color: "#64748b", fontSize: 13, fontWeight: 600,
-    cursor: "pointer", transition: "all 0.2s",
+    cursor: "pointer",
   },
   repairToggleBtnRR: {
-    background: "rgba(239,68,68,0.1)", border: "1.5px solid rgba(239,68,68,0.45)",
-    color: "#ef4444", boxShadow: "0 0 12px rgba(239,68,68,0.08)",
+    background: "rgba(220,38,38,0.06)", border: "1.5px solid rgba(220,38,38,0.4)", color: "#dc2626",
   },
   repairToggleBtnConv: {
-    background: "rgba(251,146,60,0.1)", border: "1.5px solid rgba(251,146,60,0.45)",
-    color: "#fb923c", boxShadow: "0 0 12px rgba(251,146,60,0.08)",
+    background: "rgba(249,115,22,0.06)", border: "1.5px solid rgba(249,115,22,0.4)", color: "#f97316",
   },
   rrPanel: {
-    background: "rgba(239,68,68,0.05)", border: "1px solid rgba(239,68,68,0.15)",
+    background: "#fff5f5", border: "1px solid #fecaca",
     borderRadius: 14, padding: 16, marginBottom: 18,
   },
   rrPanelHeader: {
     display: "flex", alignItems: "center", gap: 12, marginBottom: 14,
-    paddingBottom: 12, borderBottom: "1px solid rgba(239,68,68,0.1)",
+    paddingBottom: 12, borderBottom: "1px solid #fecaca",
   },
-  rrPanelTitle: { fontSize: 14, fontWeight: 700, color: "#ef4444" },
+  rrPanelTitle: { fontSize: 14, fontWeight: 700, color: "#dc2626" },
   rrPanelSub: { fontSize: 11, color: "#94a3b8", marginTop: 1 },
-  rrRow: {
-    display: "flex", alignItems: "center", gap: 10, marginBottom: 10,
-  },
-  rrRowLabel: { fontSize: 13, fontWeight: 600, color: "#cbd5e1", flex: 1 },
-  rrRateValue: {
-    width: 68, textAlign: "center", fontSize: 14, fontWeight: 800, color: "#ef4444",
-    borderLeft: "1px solid rgba(148,163,184,0.15)",
-    borderRight: "1px solid rgba(148,163,184,0.15)",
-    lineHeight: "38px",
-  },
-  rrHoursValue: {
-    width: 52, textAlign: "center", fontSize: 16, fontWeight: 800, color: "#f8fafc",
-    borderLeft: "1px solid rgba(148,163,184,0.15)",
-    borderRight: "1px solid rgba(148,163,184,0.15)",
-    lineHeight: "38px",
-  },
-  rrUnit: { fontSize: 12, color: "#64748b", fontWeight: 500, width: 28 },
-  rrSubtotal: {
-    display: "flex", justifyContent: "space-between", alignItems: "center",
-    marginTop: 4, paddingTop: 10, borderTop: "1px solid rgba(239,68,68,0.12)",
-    fontSize: 13, fontWeight: 600, color: "#94a3b8",
-  },
-  rrSubtotalVal: { fontSize: 16, fontWeight: 800, color: "#ef4444" },
-  fieldLabel: {
-    display: "block", fontSize: 10, fontWeight: 700, color: "#64748b",
-    letterSpacing: "1px", textTransform: "uppercase", marginBottom: 8, marginTop: 18,
-  },
-  sizeGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 },
-  sizeBtn: {
-    background: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.15)",
-    borderRadius: 8, padding: "10px", color: "#94a3b8", fontSize: 13, fontWeight: 600,
-    cursor: "pointer", transition: "all 0.15s", textAlign: "center",
-  },
-  sizeBtnActive: {
-    background: "rgba(245,158,11,0.15)", border: "1px solid rgba(245,158,11,0.5)",
-    color: "#f59e0b",
-  },
-  sizeBtnDisabled: {
-    opacity: 0.3, cursor: "not-allowed",
-  },
-  sizeBtnRed: {
-    background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.5)",
-    color: "#ef4444",
-  },
-  sizeBtnWarn: {
-    borderColor: "rgba(239,68,68,0.25)",
-  },
-  rangeDisplayInvalid: {
-    background: "rgba(239,68,68,0.08)", border: "1.5px solid rgba(239,68,68,0.4)",
-  },
+  rrRow: { display: "flex", alignItems: "center", gap: 10, marginBottom: 10 },
+  rrRowLabel: { fontSize: 13, fontWeight: 600, color: "#334155", flex: 1 },
+  rrRateValue: { width: 68, textAlign: "center", fontSize: 14, fontWeight: 800, color: "#dc2626", borderLeft: "1px solid #e2e8f0", borderRight: "1px solid #e2e8f0", lineHeight: "38px" },
+  rrHoursValue: { width: 52, textAlign: "center", fontSize: 16, fontWeight: 800, color: "#0f172a", borderLeft: "1px solid #e2e8f0", borderRight: "1px solid #e2e8f0", lineHeight: "38px" },
+  rrUnit: { fontSize: 12, color: "#94a3b8", fontWeight: 500, width: 28 },
+  rrSubtotal: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, paddingTop: 10, borderTop: "1px solid #fecaca", fontSize: 13, fontWeight: 600, color: "#64748b" },
+  rrSubtotalVal: { fontSize: 16, fontWeight: 800, color: "#dc2626" },
   rrWarning: {
     display: "flex", gap: 12, alignItems: "flex-start",
-    background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)",
+    background: "#fef2f2", border: "1px solid #fecaca",
     borderRadius: 12, padding: "14px 16px", marginTop: 14,
   },
-  rrWarningIcon: {
-    flexShrink: 0, marginTop: 1,
-  },
-  rrWarningTitle: {
-    fontSize: 13, fontWeight: 700, color: "#ef4444", marginBottom: 3,
-  },
-  rrWarningText: {
-    fontSize: 12, color: "#f87171", lineHeight: 1.5, opacity: 0.85,
-  },
-  rangeNavRow: {
-    display: "flex", alignItems: "center", gap: 12, marginBottom: 12,
-  },
+  rrWarningTitle: { fontSize: 13, fontWeight: 700, color: "#dc2626", marginBottom: 3 },
+  rrWarningText: { fontSize: 12, color: "#ef4444", lineHeight: 1.5 },
+  fieldLabel: { display: "block", fontSize: 10, fontWeight: 700, color: "#94a3b8", letterSpacing: "1px", textTransform: "uppercase", marginBottom: 8, marginTop: 18 },
+  rangeNavRow: { display: "flex", alignItems: "center", gap: 12, marginBottom: 12 },
   rangeArrow: {
-    background: "rgba(148,163,184,0.1)", border: "1px solid rgba(148,163,184,0.2)",
-    borderRadius: 12, width: 48, height: 48, color: "#e2e8f0",
-    cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
-    flexShrink: 0, transition: "all 0.15s",
+    background: "#f1f5f9", border: "1px solid #e2e8f0",
+    borderRadius: 12, width: 48, height: 48, color: "#334155",
+    cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
   },
   rangeDisplay: {
-    flex: 1, background: "rgba(245,158,11,0.08)", border: "1.5px solid rgba(245,158,11,0.35)",
+    flex: 1, background: "#eff6ff", border: "1.5px solid #bfdbfe",
     borderRadius: 14, padding: "14px 16px", textAlign: "center",
     minHeight: 58, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
   },
-  rangeDisplayCount: {
-    fontSize: 24, fontWeight: 800, color: "#f59e0b", letterSpacing: "-0.5px", lineHeight: 1,
+  rangeDisplayInvalid: { background: "#fef2f2", border: "1.5px solid #fecaca" },
+  rangeDisplayCount: { fontSize: 24, fontWeight: 800, color: "#1d4ed8", letterSpacing: "-0.5px", lineHeight: 1 },
+  rangeDisplayLabel: { fontSize: 11, fontWeight: 600, color: "#3b82f6", textTransform: "uppercase", letterSpacing: "0.5px", marginTop: 2 },
+  rangeDisplayPlaceholder: { fontSize: 15, fontWeight: 600, color: "#94a3b8" },
+  rangeSteps: { display: "flex", gap: 0, alignItems: "flex-start", overflowX: "auto", paddingBottom: 4, WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" },
+  rangeStep: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, padding: "4px 2px", cursor: "pointer", background: "none", border: "none", color: "#94a3b8", position: "relative" },
+  rangeStepActive: { color: "#2563eb" },
+  rangeStepPast: { color: "#93c5fd" },
+  rangeStepDot: { width: 12, height: 12, borderRadius: "50%", background: "#e2e8f0", border: "2px solid #cbd5e1", transition: "all 0.2s" },
+  rangeStepText: { fontSize: 9, fontWeight: 700, letterSpacing: "0.2px", whiteSpace: "nowrap" },
+  priceTag: { fontSize: 13, fontWeight: 600, color: "#16a34a", marginTop: 8 },
+  sizeGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 },
+  sizeBtn: {
+    background: "#f8fafc", border: "1.5px solid #e2e8f0",
+    borderRadius: 8, padding: "10px", color: "#64748b", fontSize: 13, fontWeight: 600,
+    cursor: "pointer", textAlign: "center",
   },
-  rangeDisplayLabel: {
-    fontSize: 11, fontWeight: 600, color: "#b98a1e", textTransform: "uppercase", letterSpacing: "0.5px", marginTop: 2,
-  },
-  rangeDisplayPlaceholder: {
-    fontSize: 15, fontWeight: 600, color: "#64748b",
-  },
-  rangeSteps: {
-    display: "flex", gap: 0, alignItems: "flex-start", overflowX: "auto",
-    paddingBottom: 4, WebkitOverflowScrolling: "touch",
-    msOverflowStyle: "none", scrollbarWidth: "none",
-  },
-  rangeStep: {
-    flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
-    padding: "4px 2px", cursor: "pointer", background: "none", border: "none", color: "#475569",
-    transition: "all 0.15s", position: "relative",
-  },
-  rangeStepActive: { color: "#f59e0b" },
-  rangeStepPast: { color: "#64748b" },
-  rangeStepDot: {
-    width: 12, height: 12, borderRadius: "50%", background: "rgba(148,163,184,0.2)",
-    border: "2px solid rgba(148,163,184,0.3)", transition: "all 0.2s",
-  },
-  rangeStepText: {
-    fontSize: 9, fontWeight: 700, letterSpacing: "0.2px", whiteSpace: "nowrap",
-  },
-  priceTag: { fontSize: 13, fontWeight: 600, color: "#34d399", marginTop: 8 },
+  sizeBtnActive: { background: "#eff6ff", border: "1.5px solid #3b82f6", color: "#2563eb" },
+  sizeBtnDisabled: { opacity: 0.35, cursor: "not-allowed" },
+  sizeBtnRed: { background: "#fef2f2", border: "1.5px solid #fca5a5", color: "#dc2626" },
+  sizeBtnWarn: { borderColor: "#fca5a5" },
   addonGrid: {},
   addonBtn: {
     display: "flex", alignItems: "center", gap: 10, width: "100%",
-    background: "rgba(148,163,184,0.04)", border: "1.5px solid rgba(148,163,184,0.1)",
-    borderRadius: 10, padding: "12px 14px", color: "#94a3b8", fontSize: 14,
-    fontWeight: 500, cursor: "pointer", textAlign: "left", transition: "all 0.2s",
+    background: "#f8fafc", border: "1.5px solid #e2e8f0",
+    borderRadius: 10, padding: "12px 14px", color: "#64748b", fontSize: 14, fontWeight: 500,
+    cursor: "pointer", textAlign: "left",
   },
-  addonBtnActive: {
-    background: "rgba(245,158,11,0.1)", border: "1.5px solid rgba(245,158,11,0.45)",
-    color: "#f59e0b", boxShadow: "0 0 12px rgba(245,158,11,0.08)",
-  },
+  addonBtnActive: { background: "#eff6ff", border: "1.5px solid #3b82f6", color: "#2563eb" },
   addonName: { flex: 1 },
   addonVal: { fontSize: 12, fontWeight: 600, opacity: 0.6, whiteSpace: "nowrap" },
-  addonValActive: { opacity: 1, color: "#f59e0b" },
-  osDentRow: {
-    display: "flex", alignItems: "center", gap: 10, padding: "10px 12px 6px 38px",
-  },
-  osDentLabel: {
-    fontSize: 12, color: "#94a3b8", fontWeight: 600, whiteSpace: "nowrap",
-  },
+  addonValActive: { opacity: 1, color: "#2563eb" },
+  osDentRow: { display: "flex", alignItems: "center", gap: 10, padding: "10px 12px 6px 38px" },
+  osDentLabel: { fontSize: 12, color: "#64748b", fontWeight: 600, whiteSpace: "nowrap" },
   osStepper: {
-    display: "flex", alignItems: "center", background: "#0c1222",
-    border: "1px solid rgba(148,163,184,0.2)", borderRadius: 10, overflow: "hidden",
+    display: "flex", alignItems: "center", background: "#f8fafc",
+    border: "1.5px solid #e2e8f0", borderRadius: 10, overflow: "hidden",
   },
   osStepBtn: {
-    background: "none", border: "none", color: "#e2e8f0", width: 38, height: 38,
-    display: "flex", alignItems: "center", justifyContent: "center",
-    cursor: "pointer", transition: "background 0.15s",
+    background: "none", border: "none", color: "#334155", width: 38, height: 38,
+    display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
   },
-  osStepValue: {
-    width: 40, textAlign: "center", fontSize: 16, fontWeight: 800, color: "#f8fafc",
-    borderLeft: "1px solid rgba(148,163,184,0.15)",
-    borderRight: "1px solid rgba(148,163,184,0.15)",
-    lineHeight: "38px",
-  },
-  osStepTotal: {
-    fontSize: 13, fontWeight: 700, color: "#f59e0b", marginLeft: "auto", whiteSpace: "nowrap",
-  },
-  // R&I styles
-  riToggleActive: {
-    background: "rgba(56,189,248,0.1)", border: "1.5px solid rgba(56,189,248,0.45)",
-    color: "#38bdf8",
-  },
-  riSection: {
-    background: "rgba(56,189,248,0.04)", border: "1px solid rgba(56,189,248,0.12)",
-    borderRadius: 12, padding: 14, marginBottom: 4,
-  },
-  riLaborRow: {
-    display: "flex", alignItems: "center", gap: 10, marginBottom: 12,
-    paddingBottom: 12, borderBottom: "1px solid rgba(56,189,248,0.1)",
-  },
-  riLaborLabel: { fontSize: 13, fontWeight: 600, color: "#94a3b8", flex: 1 },
-  riLaborValue: {
-    width: 68, textAlign: "center", fontSize: 14, fontWeight: 800, color: "#38bdf8",
-    borderLeft: "1px solid rgba(148,163,184,0.15)",
-    borderRight: "1px solid rgba(148,163,184,0.15)",
-    lineHeight: "38px",
-  },
-  riLaborUnit: { fontSize: 12, color: "#64748b", fontWeight: 500 },
+  osStepValue: { width: 40, textAlign: "center", fontSize: 16, fontWeight: 800, color: "#0f172a", borderLeft: "1px solid #e2e8f0", borderRight: "1px solid #e2e8f0", lineHeight: "38px" },
+  osStepTotal: { fontSize: 13, fontWeight: 700, color: "#2563eb", marginLeft: "auto", whiteSpace: "nowrap" },
+  riToggleActive: { background: "#eff6ff", border: "1.5px solid #3b82f6", color: "#2563eb" },
+  riSection: { background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 12, padding: 14, marginBottom: 4 },
+  riLaborRow: { display: "flex", alignItems: "center", gap: 10, marginBottom: 12, paddingBottom: 12, borderBottom: "1px solid #bae6fd" },
+  riLaborLabel: { fontSize: 13, fontWeight: 600, color: "#64748b", flex: 1 },
+  riLaborValue: { width: 68, textAlign: "center", fontSize: 14, fontWeight: 800, color: "#2563eb", borderLeft: "1px solid #e2e8f0", borderRight: "1px solid #e2e8f0", lineHeight: "38px" },
+  riLaborUnit: { fontSize: 12, color: "#94a3b8", fontWeight: 500 },
   riOpList: { display: "flex", flexDirection: "column", gap: 8 },
-  riOpCard: {
-    background: "rgba(148,163,184,0.04)", borderRadius: 10,
-    border: "1px solid rgba(148,163,184,0.08)", overflow: "hidden",
-  },
+  riOpCard: { background: "#ffffff", borderRadius: 10, border: "1px solid #e2e8f0", overflow: "hidden" },
   riOpTopRow: { display: "flex", alignItems: "stretch" },
-  riOpToggleBtn: {
-    flex: 1, display: "flex", alignItems: "center", gap: 10, padding: "12px 12px",
-    background: "none", border: "none", cursor: "pointer", textAlign: "left",
-    minHeight: 44,
-  },
-  riOpToggleBtnOn: { background: "rgba(56,189,248,0.04)" },
-  riOpToggleBtnRr: { background: "rgba(239,68,68,0.05)" },
-  riOpCheck: {
-    width: 22, height: 22, borderRadius: 6, flexShrink: 0,
-    border: "2px solid rgba(148,163,184,0.25)", display: "flex",
-    alignItems: "center", justifyContent: "center", color: "transparent",
-  },
-  riOpCheckOn: {
-    background: "rgba(56,189,248,0.15)", borderColor: "#38bdf8", color: "#38bdf8",
-  },
-  riOpCheckRr: {
-    background: "rgba(239,68,68,0.15)", borderColor: "#ef4444", color: "#ef4444",
-  },
-  riOpLabel: { fontSize: 14, fontWeight: 600, color: "#e2e8f0", flex: 1 },
-  riOpLabelOff: { opacity: 0.4, textDecoration: "line-through", color: "#64748b" },
-  riOpExcTag: { fontSize: 10, fontWeight: 700, color: "#475569", letterSpacing: "0.5px" },
-  riRrBtn: {
-    padding: "0 14px", fontSize: 11, fontWeight: 800, letterSpacing: "0.5px",
-    background: "rgba(148,163,184,0.06)", border: "none",
-    borderLeft: "1px solid rgba(148,163,184,0.1)", color: "#64748b",
-    cursor: "pointer", whiteSpace: "nowrap", minWidth: 56, textAlign: "center",
-  },
-  riRrBtnActive: {
-    background: "rgba(239,68,68,0.12)", color: "#ef4444",
-    borderLeft: "1px solid rgba(239,68,68,0.2)",
-  },
-  riOpBottomRow: {
-    display: "flex", alignItems: "center", justifyContent: "space-between",
-    padding: "6px 12px 10px", borderTop: "1px solid rgba(148,163,184,0.06)",
-  },
+  riOpToggleBtn: { flex: 1, display: "flex", alignItems: "center", gap: 10, padding: "12px 12px", background: "none", border: "none", cursor: "pointer", textAlign: "left", minHeight: 44 },
+  riOpToggleBtnOn: { background: "#f0f9ff" },
+  riOpToggleBtnRr: { background: "#fff5f5" },
+  riOpCheck: { width: 22, height: 22, borderRadius: 6, flexShrink: 0, border: "2px solid #cbd5e1", display: "flex", alignItems: "center", justifyContent: "center", color: "transparent" },
+  riOpCheckOn: { background: "#eff6ff", borderColor: "#3b82f6", color: "#2563eb" },
+  riOpCheckRr: { background: "#fef2f2", borderColor: "#ef4444", color: "#dc2626" },
+  riOpLabel: { fontSize: 14, fontWeight: 600, color: "#0f172a", flex: 1 },
+  riOpLabelOff: { opacity: 0.4, textDecoration: "line-through", color: "#94a3b8" },
+  riOpExcTag: { fontSize: 10, fontWeight: 700, color: "#94a3b8", letterSpacing: "0.5px" },
+  riRrBtn: { padding: "0 14px", fontSize: 11, fontWeight: 800, background: "#f8fafc", border: "none", borderLeft: "1px solid #e2e8f0", color: "#94a3b8", cursor: "pointer", whiteSpace: "nowrap", minWidth: 56, textAlign: "center" },
+  riRrBtnActive: { background: "#fef2f2", color: "#dc2626", borderLeft: "1px solid #fecaca" },
+  riOpBottomRow: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 12px 10px", borderTop: "1px solid #f1f5f9" },
   riOpTimeControls: { display: "flex", alignItems: "center", gap: 6 },
-  riTimeBtn: {
-    background: "rgba(148,163,184,0.1)", border: "1px solid rgba(148,163,184,0.2)",
-    borderRadius: 6, width: 28, height: 28, color: "#94a3b8",
-    display: "flex", alignItems: "center", justifyContent: "center",
-    cursor: "pointer", flexShrink: 0,
-  },
-  riTimeVal: {
-    minWidth: 50, textAlign: "center", fontSize: 13, fontWeight: 700, color: "#e2e8f0",
-  },
-  riOpCost: {
-    fontSize: 12, fontWeight: 700, color: "#38bdf8", width: 52, textAlign: "right",
-  },
-  riSubtotal: {
-    display: "flex", justifyContent: "space-between", alignItems: "center",
-    marginTop: 12, paddingTop: 10, borderTop: "1px solid rgba(56,189,248,0.15)",
-    fontSize: 13, fontWeight: 600, color: "#94a3b8",
-  },
-  riSubtotalVal: { fontSize: 16, fontWeight: 800, color: "#38bdf8" },
-  summaryBox: {
-    background: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.15)",
-    borderRadius: 12, padding: 16, marginTop: 20,
-  },
-  summaryRow: { display: "flex", justifyContent: "space-between", fontSize: 13, color: "#94a3b8", marginBottom: 6 },
-  summaryTotal: {
-    display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 800,
-    color: "#f59e0b", borderTop: "1px solid rgba(245,158,11,0.2)", paddingTop: 10, marginTop: 8,
-  },
-  modalFooter: {
-    display: "flex", gap: 10, padding: "16px 20px", borderTop: "1px solid rgba(248,250,252,0.06)",
-  },
-  deleteBtn: {
-    background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)",
-    borderRadius: 10, padding: "12px 16px", color: "#ef4444", fontSize: 14,
-    fontWeight: 600, cursor: "pointer",
-  },
-  saveBtn: {
-    flex: 1, background: "#f59e0b", border: "none", borderRadius: 10,
-    padding: "14px", color: "#0f172a", fontSize: 15, fontWeight: 800,
-    cursor: "pointer",
-  },
-
+  riTimeBtn: { background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, width: 28, height: 28, color: "#64748b", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 },
+  riTimeVal: { minWidth: 50, textAlign: "center", fontSize: 13, fontWeight: 700, color: "#0f172a" },
+  riOpCost: { fontSize: 12, fontWeight: 700, color: "#2563eb", width: 52, textAlign: "right" },
+  riSubtotal: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, paddingTop: 10, borderTop: "1px solid #bae6fd", fontSize: 13, fontWeight: 600, color: "#64748b" },
+  riSubtotalVal: { fontSize: 16, fontWeight: 800, color: "#2563eb" },
+  summaryBox: { background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 12, padding: 16, marginTop: 20 },
+  summaryRow: { display: "flex", justifyContent: "space-between", fontSize: 13, color: "#64748b", marginBottom: 6 },
+  summaryTotal: { display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 800, color: "#2563eb", borderTop: "1px solid #bfdbfe", paddingTop: 10, marginTop: 8 },
+  modalFooter: { display: "flex", gap: 10, padding: "16px 20px", borderTop: "1px solid #f1f5f9", background: "#ffffff" },
+  deleteBtn: { background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "12px 16px", color: "#dc2626", fontSize: 14, fontWeight: 600, cursor: "pointer" },
+  saveBtn: { flex: 1, background: "#2563eb", border: "none", borderRadius: 10, padding: "14px", color: "#ffffff", fontSize: 15, fontWeight: 800, cursor: "pointer", boxShadow: "0 2px 8px rgba(37,99,235,0.25)" },
   // Review
   emptyState: { textAlign: "center", padding: "60px 20px", color: "#94a3b8" },
-  reviewCard: {
-    background: "#111b2e", borderRadius: 14, border: "1px solid rgba(248,250,252,0.04)",
-    overflow: "hidden", marginBottom: 20,
-  },
-  reviewHeader: {
-    display: "flex", justifyContent: "space-between", alignItems: "flex-start",
-    padding: "18px 18px 14px",
-  },
-  reviewTitle: { fontWeight: 800, fontSize: 16, color: "#f8fafc" },
+  reviewCard: { background: "#ffffff", borderRadius: 14, border: "1px solid #e2e8f0", overflow: "hidden", marginBottom: 20, boxShadow: "0 1px 6px rgba(0,0,0,0.06)" },
+  reviewHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "18px 18px 14px" },
+  reviewTitle: { fontWeight: 800, fontSize: 16, color: "#0f172a" },
   reviewMeta: { fontSize: 12, color: "#64748b", marginTop: 2 },
-  grandTotal: { fontSize: 26, fontWeight: 800, color: "#f59e0b", letterSpacing: "-0.5px" },
+  grandTotal: { fontSize: 26, fontWeight: 800, color: "#2563eb", letterSpacing: "-0.5px" },
   reviewTable: {},
-  rtHead: {
-    display: "flex", padding: "10px 18px", background: "rgba(148,163,184,0.05)",
-    fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.5px", textTransform: "uppercase",
-  },
-  rtRow: {
-    display: "flex", padding: "12px 18px", borderBottom: "1px solid rgba(248,250,252,0.03)",
-    fontSize: 14, color: "#e2e8f0",
-  },
-  rtTotal: {
-    display: "flex", padding: "14px 18px", background: "rgba(245,158,11,0.08)",
-    fontSize: 15, fontWeight: 800, color: "#f59e0b",
-  },
+  rtHead: { display: "flex", padding: "10px 18px", background: "#f8fafc", fontSize: 10, fontWeight: 700, color: "#94a3b8", letterSpacing: "0.5px", textTransform: "uppercase", borderBottom: "1px solid #e2e8f0" },
+  rtRow: { display: "flex", padding: "12px 18px", borderBottom: "1px solid #f1f5f9", fontSize: 14, color: "#0f172a" },
+  rtTotal: { display: "flex", padding: "14px 18px", background: "#eff6ff", fontSize: 15, fontWeight: 800, color: "#2563eb" },
   exportBtn: {
     display: "flex", alignItems: "center", justifyContent: "center", gap: 10, width: "100%",
-    background: "linear-gradient(135deg, #1e3a5f 0%, #1a2540 100%)", border: "1px solid rgba(148,163,184,0.15)",
-    borderRadius: 12, padding: "16px", color: "#e2e8f0", fontSize: 15, fontWeight: 600,
-    cursor: "pointer", marginBottom: 10,
+    background: "#ffffff", border: "1.5px solid #e2e8f0",
+    borderRadius: 12, padding: "16px", color: "#334155", fontSize: 15, fontWeight: 600, cursor: "pointer", marginBottom: 10,
+    boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
   },
   emailRow: { display: "flex", gap: 8 },
-  emailInput: {
-    flex: 1, background: "#0c1222", border: "1px solid rgba(148,163,184,0.2)",
-    borderRadius: 10, padding: "12px 14px", color: "#e2e8f0", fontSize: 14, outline: "none",
-  },
-  emailBtn: {
-    display: "flex", alignItems: "center", gap: 6, background: "#f59e0b", border: "none",
-    borderRadius: 10, padding: "12px 18px", color: "#0f172a", fontSize: 14, fontWeight: 700, cursor: "pointer",
-  },
-  emailSuccess: { fontSize: 13, color: "#34d399", marginTop: 8, fontWeight: 600 },
-  startOverBtn: {
-    display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: "100%",
-    marginTop: 24, padding: "14px 20px", background: "none",
-    border: "1.5px solid rgba(239,68,68,0.3)", borderRadius: 10,
-    color: "#ef4444", fontSize: 14, fontWeight: 700, cursor: "pointer",
-  },
-  startOverOverlay: {
-    position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
-    background: "rgba(0,0,0,0.7)", zIndex: 9999,
-    display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
-  },
-  startOverModal: {
-    background: "#1e293b", borderRadius: 16, padding: 28, maxWidth: 340, width: "100%",
-    display: "flex", flexDirection: "column", alignItems: "center", gap: 12,
-    border: "1px solid rgba(248,250,252,0.1)",
-  },
-  startOverTitle: { fontSize: 18, fontWeight: 800, color: "#f8fafc" },
-  startOverDesc: { fontSize: 13, color: "#94a3b8", textAlign: "center", lineHeight: 1.5 },
-  startOverBtns: { display: "flex", gap: 10, width: "100%", marginTop: 8 },
-  startOverCancel: {
-    flex: 1, padding: "12px 16px", background: "rgba(148,163,184,0.1)",
-    border: "1px solid rgba(148,163,184,0.2)", borderRadius: 10,
-    color: "#94a3b8", fontSize: 14, fontWeight: 700, cursor: "pointer",
-  },
-  startOverConfirm: {
-    flex: 1, padding: "12px 16px", background: "#ef4444", border: "none", borderRadius: 10,
-    color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer",
-  },
+  emailInput: { flex: 1, background: "#f8fafc", border: "1.5px solid #e2e8f0", borderRadius: 10, padding: "12px 14px", color: "#0f172a", fontSize: 14, outline: "none" },
+  emailBtn: { display: "flex", alignItems: "center", gap: 6, background: "#2563eb", border: "none", borderRadius: 10, padding: "12px 18px", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer" },
+  emailSuccess: { fontSize: 13, color: "#16a34a", marginTop: 8, fontWeight: 600 },
   photoGrid: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 },
-  reviewPhoto: { width: "100%", aspectRatio: "1", objectFit: "cover", borderRadius: 8, border: "1px solid rgba(248,250,252,0.06)" },
+  reviewPhoto: { width: "100%", aspectRatio: "1", objectFit: "cover", borderRadius: 8, border: "1px solid #e2e8f0" },
   // SearchSelect
   ssWrap: { position: "relative" },
-  ssInput: {
-    width: "100%", background: "#0c1222", border: "1px solid rgba(148,163,184,0.2)", borderRadius: 6,
-    padding: "8px 10px", color: "#e2e8f0", fontSize: 14, outline: "none",
-  },
-  ssInputFilled: { color: "#f59e0b", fontWeight: 600 },
-  ssClear: {
-    position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
-    background: "none", border: "none", color: "#64748b", fontSize: 12, cursor: "pointer",
-    padding: "2px 4px",
-  },
-  ssDropdown: {
-    position: "absolute", top: "100%", left: 0, right: 0, zIndex: 50,
-    background: "#111b2e", border: "1px solid rgba(148,163,184,0.2)", borderRadius: 8,
-    maxHeight: 180, overflowY: "auto", marginTop: 4, boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
-    WebkitOverflowScrolling: "touch",
-  },
-  ssOption: {
-    display: "block", width: "100%", background: "none", border: "none", borderRadius: 4,
-    padding: "9px 12px", color: "#cbd5e1", fontSize: 14, textAlign: "left",
-    cursor: "pointer",
-  },
-  ssOptionActive: { background: "rgba(245,158,11,0.12)", color: "#f59e0b", fontWeight: 700 },
-  ssEmpty: { padding: "12px", color: "#475569", fontSize: 13, textAlign: "center" },
+  ssInput: { width: "100%", background: "#f8fafc", border: "1.5px solid #e2e8f0", borderRadius: 8, padding: "9px 12px", color: "#0f172a", fontSize: 14, outline: "none" },
+  ssInputFilled: { color: "#2563eb", fontWeight: 600 },
+  ssClear: { position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#94a3b8", fontSize: 12, cursor: "pointer", padding: "2px 4px" },
+  ssDropdown: { position: "absolute", top: "100%", left: 0, right: 0, zIndex: 50, background: "#ffffff", border: "1.5px solid #e2e8f0", borderRadius: 10, maxHeight: 180, overflowY: "auto", marginTop: 4, boxShadow: "0 8px 24px rgba(0,0,0,0.12)", WebkitOverflowScrolling: "touch" },
+  ssOption: { display: "block", width: "100%", background: "none", border: "none", borderRadius: 4, padding: "9px 12px", color: "#334155", fontSize: 14, textAlign: "left", cursor: "pointer" },
+  ssOptionActive: { background: "#eff6ff", color: "#2563eb", fontWeight: 700 },
+  ssEmpty: { padding: "12px", color: "#94a3b8", fontSize: 13, textAlign: "center" },
   ssBackdrop: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 40 },
+  // VIN
   vinRow: { position: "relative" },
   vinInput: { fontFamily: "monospace", letterSpacing: "1.5px", fontSize: 15, textTransform: "uppercase", paddingRight: 50 },
-  vinInputDecoded: { borderColor: "rgba(34,197,94,0.5)", background: "rgba(34,197,94,0.05)" },
-  vinCounter: { position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: "#64748b", fontWeight: 600 },
-  vinActions: { display: "flex", alignItems: "center", gap: 10, marginTop: 8 },
-  vinScanBtn: {
-    display: "flex", alignItems: "center", gap: 8, background: "rgba(56,189,248,0.1)",
-    border: "1.5px solid rgba(56,189,248,0.3)", borderRadius: 8, padding: "8px 14px",
-    color: "#38bdf8", fontSize: 13, fontWeight: 600, cursor: "pointer",
-  },
-  vinHint: { fontSize: 11, color: "#64748b" },
-  vinSuccess: { display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 12, color: "#22c55e", fontWeight: 600 },
-  vinWarn: { marginTop: 6, fontSize: 12, color: "#f59e0b", fontWeight: 500 },
-  // Scanner modal
-  vinScanOverlay: {
-    position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.9)",
-    zIndex: 9999, display: "flex", flexDirection: "column",
-  },
-  vinScanModal: {
-    flex: 1, display: "flex", flexDirection: "column", maxWidth: 480, width: "100%", margin: "0 auto",
-  },
-  vinScanHeader: {
-    display: "flex", alignItems: "center", justifyContent: "space-between",
-    padding: "16px 20px", borderBottom: "1px solid rgba(255,255,255,0.1)",
-  },
-  vinScanTitle: { color: "#f8fafc", fontSize: 16, fontWeight: 700 },
-  vinScanClose: {
-    background: "none", border: "none", color: "#94a3b8", fontSize: 22, cursor: "pointer",
-    padding: "4px 8px",
-  },
-  vinVideoWrap: {
-    flex: 1, position: "relative", overflow: "hidden", background: "#000",
-  },
-  vinVideo: { width: "100%", height: "100%", objectFit: "cover" },
-  vinScanTarget: {
-    position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
-    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-  },
-  vinScanTargetBox: {
-    width: "85%", height: 60, position: "relative", borderRadius: 4,
-  },
-  vinScanCorner1: { position: "absolute", top: 0, left: 0, width: 20, height: 20, borderTop: "3px solid #38bdf8", borderLeft: "3px solid #38bdf8" },
-  vinScanCorner2: { position: "absolute", top: 0, right: 0, width: 20, height: 20, borderTop: "3px solid #38bdf8", borderRight: "3px solid #38bdf8" },
-  vinScanCorner3: { position: "absolute", bottom: 0, left: 0, width: 20, height: 20, borderBottom: "3px solid #38bdf8", borderLeft: "3px solid #38bdf8" },
-  vinScanCorner4: { position: "absolute", bottom: 0, right: 0, width: 20, height: 20, borderBottom: "3px solid #38bdf8", borderRight: "3px solid #38bdf8" },
-  vinScanLabel: {
-    marginTop: 16, color: "#94a3b8", fontSize: 13, fontWeight: 500, textAlign: "center",
-    background: "rgba(0,0,0,0.6)", padding: "6px 14px", borderRadius: 20,
-  },
-  vinScanLine: {
-    position: "absolute", left: "7.5%", right: "7.5%", height: 2, background: "#38bdf8",
-    top: "50%", boxShadow: "0 0 8px rgba(56,189,248,0.5)",
-    animation: "vinScanAnim 2s ease-in-out infinite",
-  },
-  vinScanActions: {
-    padding: "20px", display: "flex", flexDirection: "column", alignItems: "center", gap: 12,
-    background: "rgba(0,0,0,0.8)",
-  },
-  vinCaptureBtn: {
-    width: 64, height: 64, borderRadius: 32, border: "4px solid #f8fafc",
-    background: "none", cursor: "pointer", display: "flex", alignItems: "center",
-    justifyContent: "center", padding: 0,
-  },
-  vinCaptureBtnInner: {
-    width: 48, height: 48, borderRadius: 24, background: "#f8fafc",
-  },
-  vinScanHint: { color: "#64748b", fontSize: 12, textAlign: "center" },
-  vinCapturedWrap: {
-    flex: 1, display: "flex", flexDirection: "column", alignItems: "center",
-    justifyContent: "center", padding: 30, gap: 12,
-  },
-  vinCapturedIcon: { marginBottom: 8 },
-  vinCapturedLabel: { color: "#f8fafc", fontSize: 16, fontWeight: 700, textAlign: "center" },
-  vinCapturedValue: {
-    fontFamily: "monospace", fontSize: 20, fontWeight: 800, letterSpacing: 2,
-    color: "#22c55e", background: "rgba(34,197,94,0.1)", padding: "12px 20px",
-    borderRadius: 10, border: "1.5px solid rgba(34,197,94,0.3)",
-  },
-  vinCapturedBtns: { display: "flex", gap: 10, marginTop: 12 },
-  vinConfirmBtn: {
-    padding: "12px 24px", background: "#22c55e", border: "none", borderRadius: 10,
-    color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer",
-  },
-  vinEditBtn: {
-    padding: "12px 24px", background: "rgba(148,163,184,0.15)", border: "1px solid rgba(148,163,184,0.2)",
-    borderRadius: 10, color: "#94a3b8", fontSize: 15, fontWeight: 600, cursor: "pointer",
-  },
-  vinManualInput: {
-    width: "100%", maxWidth: 340, background: "#0c1222", border: "1.5px solid rgba(148,163,184,0.3)",
-    borderRadius: 10, padding: "12px 16px", color: "#f8fafc", fontSize: 18,
-    fontFamily: "monospace", letterSpacing: 2, textAlign: "center", textTransform: "uppercase",
-    outline: "none",
-  },
-  vinManualCount: { fontSize: 12, color: "#64748b", fontWeight: 600 },
-  vfSelect: {
-    width: "100%", background: "#0c1222", border: "1px solid rgba(148,163,184,0.2)", borderRadius: 6,
-    padding: "8px 10px", color: "#e2e8f0", fontSize: 14, outline: "none",
-    appearance: "auto", WebkitAppearance: "auto",
-  },
+  vinInputDecoded: { borderColor: "#86efac", background: "#f0fdf4" },
+  vinCounter: { position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: "#94a3b8", fontWeight: 600 },
+  vinSuccess: { display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 12, color: "#16a34a", fontWeight: 600 },
+  vinWarn: { marginTop: 6, fontSize: 12, color: "#d97706", fontWeight: 500 },
+  // Carrier selector
+  carrierBar: { background: "#ffffff", borderBottom: "1px solid #e2e8f0", padding: "10px 16px 10px", display: "flex", alignItems: "center", gap: 10 },
+  carrierBarLabel: { fontSize: 10, fontWeight: 700, color: "#94a3b8", letterSpacing: "1px", whiteSpace: "nowrap" },
+  carrierScroll: { display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2, WebkitOverflowScrolling: "touch", scrollbarWidth: "none", msOverflowStyle: "none" },
+  carrierChip: { flexShrink: 0, padding: "5px 12px", borderRadius: 20, border: "1.5px solid #e2e8f0", background: "#f8fafc", color: "#64748b", fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" },
+  carrierStubBanner: { display: "flex", alignItems: "flex-start", gap: 8, background: "#fffbeb", borderBottom: "1px solid #fde68a", padding: "10px 16px", fontSize: 12, color: "#92400e" },
+  // Sign-in nudge
+  signInNudge: { display: "flex", alignItems: "center", gap: 8, background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 13, color: "#1d4ed8" },
 };
 
     const root = ReactDOM.createRoot(document.getElementById('root'));
