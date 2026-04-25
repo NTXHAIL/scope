@@ -56,9 +56,42 @@
 // ─── SUPABASE CONFIG ──────────────────────────────────────────────────────────
 // 🔧 SETUP: Replace these two values with your Supabase project credentials.
 //    Dashboard → Settings → API → Project URL & anon/public key
-const SUPABASE_URL  = "https://YOUR_PROJECT.supabase.co";
-const SUPABASE_ANON = "YOUR_ANON_KEY";
+const SUPABASE_URL  = "https://vvomivvdnmzfaaawnbxx.supabase.co";
+const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ2b21pdnZkbm16ZmFhYXduYnh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwMzIyMzIsImV4cCI6MjA5MjYwODIzMn0.pN3LxtKA9MKrLIOW7exkX48h3DsUIWGInBo-OaiWTck";
 const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+/*
+ ┌─────────────────────────────────────────────────────────────────┐
+ │  SUPABASE SETUP — run this SQL in your Supabase SQL Editor      │
+ │  Dashboard → SQL Editor → New Query → paste & run              │
+ └─────────────────────────────────────────────────────────────────┘
+
+ -- 1. Enable Row Level Security + create estimates table
+ create table public.estimates (
+   id            uuid primary key default gen_random_uuid(),
+   user_id       uuid references auth.users(id) on delete cascade not null,
+   created_at    timestamptz default now(),
+   updated_at    timestamptz default now(),
+   vehicle_info  jsonb,
+   panel_data    jsonb,
+   grand_total   numeric,
+   carrier_id    text default 'state_farm',
+   panel_count   int default 0
+ );
+
+ -- 2. Enable RLS
+ alter table public.estimates enable row level security;
+
+ -- 3. Policy: users can only see/edit their own estimates
+ create policy "Users own estimates"
+   on public.estimates for all
+   using (auth.uid() = user_id)
+   with check (auth.uid() = user_id);
+
+ -- 4. (Optional) Allow email auth in Supabase Dashboard:
+ --    Authentication → Providers → Email → Enable
+ --    Turn OFF "Confirm email" for internal tools to skip verification.
+*/
 
 // ─── CARRIERS ────────────────────────────────────────────────────────────────
 // Carrier list — matrices for non-State Farm carriers are placeholders.
@@ -112,7 +145,13 @@ function AuthModal({ onAuth, onClose }) {
       } else if (mode === "signup") {
         const { data, error: e } = await supabase.auth.signUp({ email, password });
         if (e) throw e;
-        setSuccess("Account created! Check your email to confirm, then log in.");
+        // If email confirmation is disabled, signUp returns a session and user is logged in immediately.
+        // If confirmation is required, no session yet — show the verification message.
+        if (data?.session && data?.user) {
+          onAuth(data.user);
+        } else {
+          setSuccess("Account created! Check your email to confirm, then log in.");
+        }
       } else {
         const { data, error: e } = await supabase.auth.signInWithPassword({ email, password });
         if (e) throw e;
@@ -189,12 +228,15 @@ function SavedEstimatesList({ user, onLoad, onClose }) {
 
   useEffect(() => {
     async function load() {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("estimates")
         .select("id, created_at, updated_at, vehicle_info, grand_total, carrier_id, panel_count")
         .eq("user_id", user.id)
         .order("updated_at", { ascending: false })
         .limit(50);
+      if (error) {
+        console.error("[HailSpec] Failed to load estimates:", error.message, error.details, error.hint);
+      }
       setEstimates(data || []);
       setLoading(false);
     }
@@ -202,7 +244,11 @@ function SavedEstimatesList({ user, onLoad, onClose }) {
   }, [user.id]);
 
   const handleDelete = async (id) => {
-    await supabase.from("estimates").delete().eq("id", id);
+    const { error } = await supabase.from("estimates").delete().eq("id", id);
+    if (error) {
+      console.error("[HailSpec] Delete failed:", error.message);
+      return;
+    }
     setEstimates(prev => prev.filter(e => e.id !== id));
   };
 
@@ -547,7 +593,7 @@ function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
 }
 
 // ─── PANEL EDITOR MODAL ─────────────────────────────────────────────────────
-function PanelEditor({ panel, data, onSave, onClose, onDelete }) {
+function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
   const [selectedRange, setSelectedRange] = useState(data?.selectedRange || null);
   const [size, setSize] = useState(data?.size || "DIME");
   const [addons, setAddons] = useState(data?.addons || []);
@@ -590,7 +636,7 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete }) {
   const riTotalHours = riEnabled ? defaultOps.reduce((s, op) => s + (riIncluded[op.id] ? (riTimes[op.id] || 0) : 0), 0) : 0;
   const riTotalCost = Math.round(riTotalHours * laborRate * 100) / 100;
 
-  const rows = PRICING_MATRIX[panel] || [];
+  const rows = getMatrix(carrierId || "state_farm")[panel] || [];
   const availableRanges = rows.filter(r => r.DIME > 0 || r.NICKEL > 0 || r.QUARTER > 0 || r.HALF > 0);
   const selectedRangeIdx = selectedRange ? availableRanges.findIndex(r => r.range === selectedRange) : -1;
 
@@ -1011,7 +1057,8 @@ function CameraCapture({ photos, setPhotos }) {
 }
 
 // ─── REPORT HTML ─────────────────────────────────────────────────────────────
-function generateReportHTML(vehicleInfo, panelData, photos, grandTotal) {
+function generateReportHTML(vehicleInfo, panelData, photos, grandTotal, carrierLabel) {
+  carrierLabel = carrierLabel || "State Farm";
   const date = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
   const panels = Object.entries(panelData).filter(([, d]) => d.count > 0 || d.rrEnabled || d.convEnabled);
   let lineNum = 0, totalPrice = 0, totalLabor = 0;
@@ -1056,7 +1103,7 @@ function generateReportHTML(vehicleInfo, panelData, photos, grandTotal) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>NTX Hail — Estimate</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Segoe UI',system-ui,sans-serif;color:#1e293b;padding:40px;max-width:800px;margin:0 auto;font-size:13px}.header{border-bottom:3px solid #0a1628;padding-bottom:20px;margin-bottom:24px}.brand{display:flex;align-items:center;gap:10px}.brand-name{font-size:18px;font-weight:900;letter-spacing:1px;color:#0a1628}.brand-tag{font-size:11px;color:#2563eb;font-weight:700;letter-spacing:2px;text-transform:uppercase}.header p{color:#64748b;margin-top:4px;font-size:13px}.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;margin-bottom:24px;font-size:13px}.info-grid dt{color:#64748b;font-weight:500}.info-grid dd{font-weight:600}table{width:100%;border-collapse:collapse;margin-bottom:20px}th{background:#0a1628;color:#f8fafc;padding:8px 10px;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.5px}td{padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:13px}.ln{width:36px;color:#94a3b8;font-weight:600;text-align:center;font-size:12px}.amt{text-align:right;font-weight:600;white-space:nowrap}.section-row td{background:#eff6ff;font-weight:800;font-size:13px;color:#1e3a5f;padding:8px 10px;border-bottom:2px solid #bfdbfe}.section-row-rr td{background:#fef2f2;font-weight:800;font-size:13px;color:#7f1d1d;padding:8px 10px;border-bottom:2px solid #fecaca}.addon-row td{color:#475569}.labor-row td{color:#1e293b}.rr-labor-row td{color:#dc2626}.subtotal-row td{border-top:2px solid #cbd5e1;font-weight:700;font-size:13px;padding:8px 10px}.total-row td{border-top:3px solid #0a1628;font-weight:800;font-size:15px;padding:10px}.total-row .amt{font-size:16px;color:#2563eb}.photos{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}.photos img{width:150px;height:110px;object-fit:cover;border-radius:6px;border:1px solid #e2e8f0}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #e2e8f0;font-size:11px;color:#94a3b8;text-align:center}@media print{body{padding:20px}button{display:none}}</style>
 </head><body>
-<div class="header"><div class="brand"><div><div class="brand-name">NTX HAIL</div><div class="brand-tag">HailSpec Estimator</div></div></div><p>State Farm Matrix Pricing — ${date}</p></div>
+<div class="header"><div class="brand"><div><div class="brand-name">NTX HAIL</div><div class="brand-tag">HailSpec Estimator</div></div></div><p>${carrierLabel} Matrix Pricing — ${date}</p></div>
 <dl class="info-grid"><dt>Owner</dt><dd>${vehicleInfo.owner||"—"}</dd><dt>Vehicle</dt><dd>${[vehicleInfo.year,vehicleInfo.make,vehicleInfo.model].filter(Boolean).join(" ")||"—"}</dd><dt>VIN</dt><dd>${vehicleInfo.vin||"—"}</dd><dt>Claim #</dt><dd>${vehicleInfo.claim||"—"}</dd></dl>
 <table><thead><tr><th style="width:36px">Line</th><th>Operation</th><th>Qty</th><th style="text-align:right">Price $</th><th style="text-align:right">Labor $</th></tr></thead>
 <tbody>${allRows}<tr class="subtotal-row"><td></td><td colspan="2">Subtotals</td><td class="amt">$${totalPrice.toLocaleString()}</td><td class="amt">$${totalLabor.toFixed(2)}</td></tr>
@@ -1242,13 +1289,15 @@ function HailEstimator() {
         const total = active.reduce((s,[,d]) => s+d.totalPrice, 0);
         const payload = { user_id:user.id, vehicle_info:vehicleInfo, panel_data:panelData, grand_total:total, carrier_id:carrierId, panel_count:active.length, updated_at:new Date().toISOString() };
         if (currentEstimateId) {
-          await supabase.from("estimates").update(payload).eq("id", currentEstimateId);
+          const { error: updateErr } = await supabase.from("estimates").update(payload).eq("id", currentEstimateId);
+          if (updateErr) { console.error("[HailSpec] Auto-save update failed:", updateErr.message, updateErr.hint); throw updateErr; }
         } else {
-          const { data } = await supabase.from("estimates").insert({...payload, created_at:new Date().toISOString()}).select("id").single();
+          const { data, error: insertErr } = await supabase.from("estimates").insert({...payload, created_at:new Date().toISOString()}).select("id").single();
+          if (insertErr) { console.error("[HailSpec] Auto-save insert failed:", insertErr.message, insertErr.hint); throw insertErr; }
           if (data?.id) setCurrentEstimateId(data.id);
         }
         setSaveStatus("saved"); setTimeout(() => setSaveStatus("idle"), 2500);
-      } catch { setSaveStatus("error"); }
+      } catch(saveErr) { console.error("[HailSpec] Auto-save error:", saveErr); setSaveStatus("error"); }
     }, 1500);
   }, [panelData, vehicleInfo, carrierId, user]);
 
