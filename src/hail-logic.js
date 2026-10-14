@@ -4,7 +4,7 @@
 export const ESTIMATE_DISCLAIMER =
   "This is a repair estimate only. It is not a promise to waive a deductible, pay a rebate, or cover any part of an insurance claim.";
 
-export const GHL_SUBMIT_URL = "https://backend.leadconnectorhq.com/forms/submit";
+export const GHL_SUMMARY_LIMIT = 1500;
 
 export const CARRIERS = [
   { id: "state_farm",  label: "State Farm",  color: "#dc2626", badge: "SF"  },
@@ -496,64 +496,74 @@ ${safePhotos.length > 0 ? `<h3 style="margin-bottom:12px;font-size:14px">Documen
 
 export function parseGhlForm(value) {
   const raw = String(value || "").trim();
-  if (!raw) return { formId: "", embedUrl: "", submitUrl: GHL_SUBMIT_URL };
+  if (!raw) return { formId: "", embedUrl: "" };
   if (/^https?:\/\//i.test(raw)) {
     const match = raw.match(/\/form\/([A-Za-z0-9]+)/) || raw.match(/[?&](?:formId|id)=([A-Za-z0-9]+)/);
     const formId = match ? match[1] : "";
-    return { formId, embedUrl: raw, submitUrl: GHL_SUBMIT_URL };
+    const embedUrl = raw.split("?")[0];
+    return { formId, embedUrl };
   }
   return {
     formId: raw,
     embedUrl: `https://api.leadconnectorhq.com/widget/form/${raw}`,
-    submitUrl: GHL_SUBMIT_URL,
   };
 }
 
-export function buildLeadFormData({ formValue, locationId, lead, summary, fieldMap }) {
+export function fitSummaryForUrl(summary, limit = GHL_SUMMARY_LIMIT) {
+  const text = String(summary || "").replace(/\r\n/g, "\n").trim();
+  if (text.length <= limit) return text;
+  const lines = text.split("\n");
+  const isPanel = (line) => / — \$/.test(line);
+  const header = [];
+  const panels = [];
+  const footer = [];
+  let seenPanel = false;
+  for (const line of lines) {
+    if (isPanel(line)) {
+      seenPanel = true;
+      panels.push(line);
+      continue;
+    }
+    if (!seenPanel) header.push(line);
+    else if (line.startsWith("Grand total:") || line === ESTIMATE_DISCLAIMER) footer.push(line);
+  }
+  const assemble = (keptCount) => {
+    const omitted = panels.length - keptCount;
+    const body = [...header, ...panels.slice(0, keptCount)];
+    if (omitted > 0) body.push(`… and ${omitted} more panel${omitted === 1 ? "" : "s"}`);
+    if (footer.length) body.push("", ...footer);
+    return body.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  };
+  for (let count = panels.length; count >= 0; count -= 1) {
+    const candidate = assemble(count);
+    if (candidate.length <= limit) return candidate;
+  }
+  const hard = assemble(0);
+  if (hard.length <= limit) return hard;
+  return `${hard.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
+export function buildGhlEmbedUrl({ formValue, lead = {}, summary = "", summaryFieldId = "" }) {
   const parsed = parseGhlForm(formValue);
-  const map = fieldMap || {};
-  const info = lead.vehicleInfo || {};
-  const values = {
-    full_name: String(lead.name || "").trim(),
-    email: String(lead.email || "").trim(),
-    phone: String(lead.phone || "").trim(),
-    notes: String(lead.notes || "").trim(),
-    estimate_summary: summary || "",
-    vehicle: vehicleLine(info),
-    vin: info.vin || "",
-    claim_number: info.claim || "",
-    carrier: lead.carrierLabel || "",
-    grand_total: String(lead.grandTotal ?? ""),
-    panel_count: String(lead.panelCount ?? ""),
-    opportunity_name: `Hail estimate — ${vehicleLine(info) || "vehicle"} — $${Number(lead.grandTotal || 0).toLocaleString("en-US")}`,
-  };
-  if (!map.notes && values.notes) {
-    values.estimate_summary = `Notes: ${values.notes}\n\n${values.estimate_summary}`.trim();
+  if (!parsed.embedUrl) return "";
+  const url = new URL(parsed.embedUrl);
+  const notes = String(lead.notes || "").trim();
+  let text = String(summary || "").trim();
+  if (notes) text = `Notes: ${notes}\n\n${text}`.trim();
+  text = fitSummaryForUrl(text);
+  const params = new URLSearchParams();
+  const name = String(lead.name || "").trim();
+  const phone = String(lead.phone || "").trim();
+  const email = String(lead.email || "").trim();
+  if (name) params.set("full_name", name);
+  if (phone) params.set("phone", phone);
+  if (email) params.set("email", email);
+  if (text) {
+    params.set("estimate_summary", text);
+    if (summaryFieldId) params.set(summaryFieldId, text);
   }
-  const formData = {};
-  if (parsed.formId) formData.formId = parsed.formId;
-  if (locationId) {
-    formData.locationId = locationId;
-    formData.location_id = locationId;
-  }
-  for (const [logical, key] of Object.entries(map)) {
-    if (!key) continue;
-    const value = values[logical];
-    if (value == null || value === "") continue;
-    formData[key] = String(value);
-  }
-  return { ...parsed, formData };
-}
-
-export async function submitGhlLead(args, fetchImpl = globalThis.fetch) {
-  const built = buildLeadFormData(args);
-  if (!built.formId) return { ok: false, reason: "unconfigured" };
-  const body = new FormData();
-  body.set("formData", JSON.stringify(built.formData));
-  const response = await fetchImpl(built.submitUrl, { method: "POST", body });
-  let text = "";
-  try { text = await response.text(); } catch (err) { text = ""; }
-  return { ok: response.ok, status: response.status, body: String(text).slice(0, 500), formId: built.formId };
+  url.search = params.toString();
+  return url.toString();
 }
 
 export function validateLead(lead) {
@@ -561,6 +571,7 @@ export function validateLead(lead) {
   if (!String(lead?.name || "").trim()) errors.name = "Enter your name.";
   const digits = String(lead?.phone || "").replace(/\D/g, "");
   if (digits.length < 10) errors.phone = "Enter a phone number with at least 10 digits.";
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(lead?.email || "").trim())) errors.email = "Enter an email address.";
+  const email = String(lead?.email || "").trim();
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.email = "Enter an email address.";
   return errors;
 }

@@ -5,10 +5,10 @@ import {
   DEFAULT_LABOR_RATE, CARRIERS, carrierHasMatrix, getMaxCount, quotePanel,
   VEHICLE_YEARS, VEHICLE_DATA, VEHICLE_MAKES, decodeVIN,
   activePanels, grandTotalOf, maxDentCount, generateReportHTML,
-  buildEstimateSummary, ESTIMATE_DISCLAIMER, validateLead, submitGhlLead,
-  buildLeadFormData, parseGhlForm,
+  buildEstimateSummary, ESTIMATE_DISCLAIMER, validateLead, parseGhlForm,
+  buildGhlEmbedUrl,
 } from "./hail-logic.js";
-import { GHL_FORM, GHL_LOCATION_ID, GHL_FIELDS } from "./config.js";
+import { GHL_FORM, GHL_SUMMARY_FIELD_ID } from "./config.js";
 
 function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
   const panelPaths = {
@@ -642,126 +642,86 @@ function VehicleForm({ vehicleInfo, setVehicleInfo, onClose }) {
 const EMPTY_VEHICLE = { owner: "", year: "", make: "", model: "", vin: "", claim: "" };
 const DRAFT_KEY = "hailspec.draft.v1";
 
-function postLeadViaIframe(built) {
-  return new Promise((resolve, reject) => {
-    const iframe = document.createElement("iframe");
-    const name = "ghl_sink_" + Date.now();
-    iframe.name = name;
-    iframe.title = "Lead form delivery";
-    iframe.style.cssText = "position:absolute;width:0;height:0;border:0;visibility:hidden";
-    iframe.setAttribute("aria-hidden", "true");
-    const form = document.createElement("form");
-    form.method = "POST";
-    form.action = built.submitUrl;
-    form.target = name;
-    form.acceptCharset = "UTF-8";
-    const input = document.createElement("input");
-    input.type = "hidden";
-    input.name = "formData";
-    input.value = JSON.stringify(built.formData);
-    form.appendChild(input);
-    let settled = false;
-    const finish = (ok) => {
-      if (settled) return;
-      settled = true;
-      setTimeout(() => {
-        form.remove();
-        iframe.remove();
-      }, 1500);
-      if (ok) resolve({ ok: true, method: "iframe" });
-      else reject(new Error("Lead form did not load"));
-    };
-    let loads = 0;
-    iframe.onload = () => {
-      loads += 1;
-      if (loads >= 2) finish(true);
-    };
-    document.body.appendChild(iframe);
-    document.body.appendChild(form);
-    form.submit();
-    setTimeout(() => finish(loads >= 2), 5000);
-  });
-}
-
-function LeadCapture({ summary, vehicleInfo, carrierLabel, grandTotal, panelCount }) {
+function LeadCapture({ summary }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [notes, setNotes] = useState("");
   const [errors, setErrors] = useState({});
-  const [status, setStatus] = useState("idle");
-  const [message, setMessage] = useState("");
+  const [embedUrl, setEmbedUrl] = useState("");
   const configured = Boolean(parseGhlForm(GHL_FORM).formId);
 
-  const handleSubmit = async (event) => {
+  useEffect(() => {
+    if (!embedUrl) return undefined;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [embedUrl]);
+
+  const handleSubmit = (event) => {
     event.preventDefault();
-    const lead = { name, phone, email, notes, vehicleInfo, carrierLabel, grandTotal, panelCount };
+    const lead = { name, phone, email, notes };
     const nextErrors = validateLead(lead);
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length) return;
     if (!configured) {
-      setStatus("error");
-      setMessage("This estimate is ready. Lead delivery is not connected yet — download it and NTX Hail can take it from there.");
+      setErrors({ form: "This estimate is ready. Lead delivery is not connected yet — download it and NTX Hail can take it from there." });
       return;
     }
-    setStatus("sending");
-    setMessage("");
-    const args = {
+    const url = buildGhlEmbedUrl({
       formValue: GHL_FORM,
-      locationId: GHL_LOCATION_ID,
       lead,
       summary,
-      fieldMap: GHL_FIELDS,
-    };
-    try {
-      const result = await submitGhlLead(args);
-      if (result.ok) {
-        setStatus("sent");
-        setMessage("Sent. NTX Hail has this estimate.");
-        return;
-      }
-      setStatus("error");
-      setMessage("The form did not accept this estimate. Download it, or check that the form fields match the setup notes.");
-    } catch (err) {
-      try {
-        const built = buildLeadFormData(args);
-        await postLeadViaIframe(built);
-        setStatus("sent");
-        setMessage("Sent. NTX Hail has this estimate.");
-      } catch (fallbackErr) {
-        setStatus("error");
-        setMessage("Could not reach the form. Download the estimate and try again.");
-      }
+      summaryFieldId: GHL_SUMMARY_FIELD_ID,
+    });
+    if (!url) {
+      setErrors({ form: "Could not open the form. Download the estimate and try again." });
+      return;
     }
+    setEmbedUrl(url);
   };
 
   const S = styles;
   return (
-    <form onSubmit={handleSubmit} style={S.leadCard}>
-      <div style={S.sectionLabel}>Send this estimate</div>
-      <p style={S.leadIntro}>Name, phone, and email so NTX Hail can follow up. The estimate above is included. No account needed.</p>
-      <label style={S.leadLabel}>Name
-        <input value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" style={S.leadInput} />
-      </label>
-      {errors.name && <div style={S.leadError}>{errors.name}</div>}
-      <label style={S.leadLabel}>Phone
-        <input value={phone} onChange={(e) => setPhone(e.target.value)} autoComplete="tel" inputMode="tel" type="tel" style={S.leadInput} />
-      </label>
-      {errors.phone && <div style={S.leadError}>{errors.phone}</div>}
-      <label style={S.leadLabel}>Email
-        <input value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" type="email" style={S.leadInput} />
-      </label>
-      {errors.email && <div style={S.leadError}>{errors.email}</div>}
-      <label style={S.leadLabel}>Notes <span style={S.optional}>(optional)</span>
-        <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} style={{ ...S.leadInput, minHeight: 88, resize: "vertical" }} />
-      </label>
-      <div style={S.summaryPreview}>{summary}</div>
-      <button type="submit" disabled={status === "sending" || status === "sent"} style={{ ...S.saveBtn, width: "100%", minHeight: 48, opacity: status === "sending" ? 0.7 : 1 }}>
-        {status === "sending" ? "Sending…" : status === "sent" ? "Sent" : "Send to NTX Hail"}
-      </button>
-      {message && <div style={status === "sent" ? S.leadOk : S.leadError}>{message}</div>}
-      <p style={S.disclaimer}>{ESTIMATE_DISCLAIMER}</p>
-    </form>
+    <>
+      <form onSubmit={handleSubmit} style={S.leadCard}>
+        <div style={S.sectionLabel}>Send this estimate</div>
+        <p style={S.leadIntro}>Name and phone so NTX Hail can follow up. Email is optional. The estimate above is included. On the next screen, check the consent boxes and submit the form. No account needed.</p>
+        <label style={S.leadLabel}>Name
+          <input value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" style={S.leadInput} />
+        </label>
+        {errors.name && <div style={S.leadError}>{errors.name}</div>}
+        <label style={S.leadLabel}>Phone
+          <input value={phone} onChange={(e) => setPhone(e.target.value)} autoComplete="tel" inputMode="tel" type="tel" style={S.leadInput} />
+        </label>
+        {errors.phone && <div style={S.leadError}>{errors.phone}</div>}
+        <label style={S.leadLabel}>Email <span style={S.optional}>(optional)</span>
+          <input value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" type="email" style={S.leadInput} />
+        </label>
+        {errors.email && <div style={S.leadError}>{errors.email}</div>}
+        <label style={S.leadLabel}>Notes <span style={S.optional}>(optional)</span>
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} style={{ ...S.leadInput, minHeight: 88, resize: "vertical" }} />
+        </label>
+        <div style={S.summaryPreview}>{summary}</div>
+        <button type="submit" style={{ ...S.saveBtn, width: "100%", minHeight: 48 }}>Send to NTX Hail</button>
+        {errors.form && <div style={S.leadError}>{errors.form}</div>}
+        <p style={S.disclaimer}>{ESTIMATE_DISCLAIMER}</p>
+      </form>
+      {embedUrl && (
+        <div style={S.ghlOverlay} role="dialog" aria-modal="true" aria-label="NTX Hail estimate form">
+          <div style={S.ghlBar}>
+            <div style={{ minWidth: 0 }}>
+              <div style={S.ghlTitle}>Send to NTX Hail</div>
+              <p style={S.ghlHint}>Check the consent boxes, then submit the form.</p>
+            </div>
+            <button type="button" onClick={() => setEmbedUrl("")} style={S.ghlClose}>Close</button>
+          </div>
+          <iframe title="NTX Hail estimate form" src={embedUrl} style={S.ghlFrame} />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1088,7 +1048,7 @@ function HailEstimator() {
                 </div>
               </div>
               <p style={S.disclaimer}>Max dents adds the top of each dent range. It is not an exact dent count. {ESTIMATE_DISCLAIMER}</p>
-              <LeadCapture summary={summary} vehicleInfo={vehicleInfo} carrierLabel={activeCarrier.label} grandTotal={grandTotal} panelCount={panels.length} />
+              <LeadCapture summary={summary} />
               <div style={S.section}>
                 <div style={S.sectionLabel}>Export</div>
                 <div style={S.exportStack}>
@@ -1462,6 +1422,12 @@ const styles = {
   leadOk: { color: "#15803d", fontSize: 14, fontWeight: 700, marginTop: 10 },
   optional: { fontWeight: 500, color: "#94a3b8" },
   summaryPreview: { whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 12, fontSize: 12, lineHeight: 1.45, color: "#334155", margin: "4px 0 12px", maxHeight: 180, overflowY: "auto" },
+  ghlOverlay: { position: "fixed", top: 0, right: 0, bottom: 0, left: 0, zIndex: 200, background: "#ffffff", display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top)", overflow: "hidden" },
+  ghlBar: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderBottom: "1px solid #e2e8f0", flexShrink: 0, background: "#ffffff" },
+  ghlTitle: { fontSize: 16, fontWeight: 800, color: "#0f172a" },
+  ghlHint: { fontSize: 13, lineHeight: 1.35, color: "#475569", margin: "2px 0 0" },
+  ghlClose: { minWidth: 44, minHeight: 44, padding: "10px 14px", borderRadius: 10, border: "1px solid #e2e8f0", background: "#f8fafc", color: "#0f172a", fontSize: 15, fontWeight: 700, cursor: "pointer", flexShrink: 0 },
+  ghlFrame: { flex: 1, width: "100%", border: "none", background: "#ffffff" },
   exportStack: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 },
   reviewItem: { padding: "12px 16px", borderBottom: "1px solid #f1f5f9" },
   reviewItemTop: { display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" },

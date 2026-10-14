@@ -8,15 +8,15 @@ import {
   escapeHtml,
   generateReportHTML,
   buildEstimateSummary,
-  buildLeadFormData,
-  submitGhlLead,
+  fitSummaryForUrl,
+  buildGhlEmbedUrl,
   validateLead,
   parseGhlForm,
   ESTIMATE_DISCLAIMER,
   carrierHasMatrix,
-  GHL_SUBMIT_URL,
+  GHL_SUMMARY_LIMIT,
 } from "../src/hail-logic.js";
-import { GHL_FIELDS, GHL_LOCATION_ID } from "../src/config.js";
+import { GHL_FORM, GHL_SUMMARY_FIELD_ID } from "../src/config.js";
 
 test("State Farm hood prices come from the matrix", () => {
   assert.equal(lookupPrice("HOOD", 3, "DIME", "state_farm"), 80);
@@ -112,74 +112,76 @@ test("estimate summary includes the result and no waiver promise", () => {
   assert.equal(/waive your deductible/i.test(summary), false);
 });
 
-test("lead payload posts only mapped fields and never a token", async () => {
-  const summary = "Carrier: State Farm\nGrand total: $175";
-  const fieldMap = { ...GHL_FIELDS, notes: "" };
-  const built = buildLeadFormData({
-    formValue: "https://api.leadconnectorhq.com/widget/form/FormId123",
-    locationId: GHL_LOCATION_ID,
+test("email is optional and a bad email still fails", () => {
+  assert.deepEqual(validateLead({ name: "Ada", phone: "2145550100", email: "" }), {});
+  const errors = validateLead({ name: "", phone: "123", email: "not-an-email" });
+  assert.ok(errors.name);
+  assert.equal(errors.phone.includes("123"), false);
+  assert.match(errors.phone, /10 digits/);
+  assert.ok(errors.email);
+  assert.deepEqual(validateLead({ name: "Ada", phone: "2145550100", email: "ada@example.com" }), {});
+});
+
+test("a short summary is left as written", () => {
+  const text = "Hood: 6 - 15 nickel dents — $175\n\nGrand total: $175\n" + ESTIMATE_DISCLAIMER;
+  assert.equal(fitSummaryForUrl(text), text.trim());
+});
+
+test("a huge summary drops extra panels and stays within the URL limit", () => {
+  const panels = Array.from({ length: 40 }, (_, index) => `Panel ${index}: 6 - 15 nickel dents — $${100 + index}`);
+  const summary = [
+    "Carrier: State Farm",
+    "Vehicle: 2020 Toyota Camry",
+    ...panels,
+    "",
+    "Grand total: $9999",
+    ESTIMATE_DISCLAIMER,
+  ].join("\n");
+  const fitted = fitSummaryForUrl(summary, GHL_SUMMARY_LIMIT);
+  assert.ok(fitted.length <= GHL_SUMMARY_LIMIT);
+  assert.match(fitted, /Panel 0:/);
+  assert.match(fitted, /more panel/);
+  assert.match(fitted, /Grand total: \$9999/);
+  assert.ok(fitted.includes(ESTIMATE_DISCLAIMER));
+  assert.equal(fitted.includes("Panel 39:"), false);
+});
+
+test("the embed URL prefills the public form and does not post", () => {
+  const summary = "Carrier: State Farm\nHood: 6 - 15 nickel dents — $175\n\nGrand total: $175";
+  const url = buildGhlEmbedUrl({
+    formValue: GHL_FORM,
+    summaryFieldId: GHL_SUMMARY_FIELD_ID,
     summary,
-    fieldMap,
     lead: {
       name: "Ada Lovelace",
       phone: "2145550100",
-      email: "ada@example.com",
+      email: "",
       notes: "Driver side is worse",
-      carrierLabel: "State Farm",
-      grandTotal: 175,
-      panelCount: 1,
-      vehicleInfo: { year: "2020", make: "Toyota", model: "Camry", vin: "4T1BF1FK5HU123456", claim: "CLM1" },
     },
   });
-  assert.equal(built.formId, "FormId123");
-  assert.equal(built.submitUrl, GHL_SUBMIT_URL);
-  assert.equal(built.formData.full_name, "Ada Lovelace");
-  assert.equal(built.formData.email, "ada@example.com");
-  assert.equal(built.formData.phone, "2145550100");
-  assert.match(built.formData.estimate_summary, /Driver side is worse/);
-  assert.match(built.formData.estimate_summary, /Grand total: \$175/);
-  assert.equal(built.formData.vehicle, undefined);
-  assert.equal(JSON.stringify(built).toLowerCase().includes("bearer"), false);
-  assert.equal(JSON.stringify(built).toLowerCase().includes("token"), false);
-  assert.equal(built.formData.locationId, "o6DlmLuYCNFntSijxhMG");
-
-  let called = false;
-  const skipped = await submitGhlLead({ formValue: "", locationId: GHL_LOCATION_ID, lead: {}, summary: "", fieldMap }, () => {
-    called = true;
-  });
-  assert.equal(skipped.reason, "unconfigured");
-  assert.equal(called, false);
-
-  let recorded = null;
-  const result = await submitGhlLead({
-    formValue: "FormId123",
-    locationId: GHL_LOCATION_ID,
-    lead: { name: "Ada Lovelace", phone: "2145550100", email: "ada@example.com" },
-    summary,
-    fieldMap,
-  }, async (url, init) => {
-    recorded = { url, init };
-    assert.equal(init.headers, undefined);
-    const posted = JSON.parse(init.body.get("formData"));
-    assert.equal(posted.formId, "FormId123");
-    assert.equal(posted.email, "ada@example.com");
-    return { ok: true, status: 200, text: async () => "{\"ok\":true}" };
-  });
-  assert.equal(result.ok, true);
-  assert.equal(recorded.url, GHL_SUBMIT_URL);
+  const parsed = new URL(url);
+  assert.equal(parsed.origin + parsed.pathname, "https://api.leadconnectorhq.com/widget/form/g99Lxl9E4vJX8OfrSWWt");
+  assert.equal(parsed.searchParams.get("full_name"), "Ada Lovelace");
+  assert.equal(parsed.searchParams.get("phone"), "2145550100");
+  assert.equal(parsed.searchParams.has("email"), false);
+  const summaryParam = parsed.searchParams.get("estimate_summary");
+  assert.match(summaryParam, /Driver side is worse/);
+  assert.match(summaryParam, /Grand total: \$175/);
+  assert.equal(summaryParam, parsed.searchParams.get(GHL_SUMMARY_FIELD_ID));
+  assert.equal(url.includes("forms/submit"), false);
+  assert.equal(url.toLowerCase().includes("bearer"), false);
+  assert.equal(buildGhlEmbedUrl({ formValue: "" }), "");
+  assert.equal(GHL_FORM, "g99Lxl9E4vJX8OfrSWWt");
+  assert.equal(GHL_SUMMARY_FIELD_ID, "SUhCo0uSQg2PrR3VPHp9");
 });
 
-test("lead validation messages do not repeat the phone number", () => {
-  const errors = validateLead({ name: "", phone: "123", email: "not-an-email" });
-  assert.equal(errors.phone.includes("123"), false);
-  assert.match(errors.phone, /10 digits/);
-  assert.deepEqual(validateLead({ name: "Ada", phone: "(214) 555-0100", email: "ada@example.com" }), {});
-});
-
-test("a form id and an embed URL parse to the same form", () => {
+test("a form id and the public embed URL parse to the same form", () => {
   assert.equal(parseGhlForm("AbC123").formId, "AbC123");
   assert.equal(parseGhlForm("https://link.msgsndr.com/widget/form/AbC123").embedUrl.includes("AbC123"), true);
   assert.equal(parseGhlForm("").formId, "");
+  const live = parseGhlForm("https://api.leadconnectorhq.com/widget/form/g99Lxl9E4vJX8OfrSWWt");
+  assert.equal(live.formId, "g99Lxl9E4vJX8OfrSWWt");
+  assert.equal(live.embedUrl, "https://api.leadconnectorhq.com/widget/form/g99Lxl9E4vJX8OfrSWWt");
 });
 
 test("the page and source do not show a phone number or a login gate", () => {
@@ -190,6 +192,8 @@ test("the page and source do not show a phone number or a login gate", () => {
     const text = fs.readFileSync(file, "utf8");
     assert.equal(phone.test(text), false, file);
     for (const pattern of banned) assert.equal(pattern.test(text), false, `${file} ${pattern}`);
+    assert.equal(text.includes("forms/submit"), false, file);
+    assert.equal(text.includes("backend.leadconnectorhq.com"), false, file);
   }
   const page = fs.readFileSync("index.html", "utf8");
   assert.equal(page.includes("app.js"), true);
