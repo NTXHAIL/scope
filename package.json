@@ -4,13 +4,15 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test test/hail-logic.test.js"
+    "test": "node --test test/hail-logic.test.js",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "esbuild": "^0.25.10"
   }
 }

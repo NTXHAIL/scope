@@ -4,11 +4,21 @@ import {
   ADDONS, PANEL_LABELS, RI_OPERATIONS, DENT_SIZES, DENT_SIZE_LABELS,
   DEFAULT_LABOR_RATE, CARRIERS, carrierHasMatrix, getMaxCount, quotePanel,
   VEHICLE_YEARS, VEHICLE_DATA, VEHICLE_MAKES, decodeVIN,
-  activePanels, grandTotalOf, maxDentCount, generateReportHTML,
+  activePanels, grandTotalOf, maxDentCount,
   buildEstimateSummary, ESTIMATE_DISCLAIMER, validateLead, parseGhlForm,
-  buildGhlEmbedUrl,
+  buildGhlEmbedUrl, reportDocument, buildEstimatePdf, estimatePdfName,
+  blankVehicle, estimateHasWork, createEstimateId, parseDraft, parseSavedEstimates,
+  archiveEstimate, openSavedEstimate, estimateTitle,
+  DRAFT_STORAGE_KEY, SAVED_STORAGE_KEY,
 } from "./hail-logic.js";
 import { GHL_FORM, GHL_SUMMARY_FIELD_ID } from "./config.js";
+
+const PANEL_SHORT = {
+  HOOD: "Hood", ROOF: "Roof", TRUNK: "Trunk",
+  LFF: "L Fender", RFF: "R Fender", LFD: "L Door", RFD: "R Door",
+  LRD: "LR Door", RRD: "RR Door", LQ: "L Quarter", RQ: "R Quarter",
+  LRAIL: "L Rail", RRAIL: "R Rail",
+};
 
 function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
   const panelPaths = {
@@ -47,7 +57,7 @@ function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
   };
 
   return (
-    <svg viewBox="60 0 300 490" style={{ width: "100%", maxWidth: 340, margin: "0 auto", display: "block" }}>
+    <svg viewBox="60 0 300 490" role="group" aria-label="Vehicle panels" style={{ width: "100%", maxWidth: 360, margin: "0 auto", display: "block" }}>
       <path d="M130,15 C160,5 260,5 290,15 L325,35 C340,60 340,80 335,110 L335,430 C335,455 320,475 290,480 L240,488 C225,490 195,490 180,488 L130,480 C100,475 85,455 85,430 L85,110 C80,80 80,60 95,35 Z"
         fill="none" stroke="#cbd5e1" strokeWidth="3.5" />
       <path d="M155,125 L265,125 L272,140 L272,150 L148,150 L148,140 Z" fill="rgba(219,234,254,0.6)" stroke="#bfdbfe" strokeWidth="1" />
@@ -55,32 +65,39 @@ function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
       {Object.entries(panelPaths).map(([key, { d, cx, cy }]) => {
         const isSelected = selectedPanel === key;
         const hasData = panelData[key] && (panelData[key].count > 0 || panelData[key].rrEnabled || panelData[key].convEnabled);
+        const short = PANEL_SHORT[key] || key;
+        const words = short.split(" ");
+        const choose = () => onSelectPanel(key);
         return (
-          <g key={key} onClick={() => onSelectPanel(key)} style={{ cursor: "pointer" }}>
+          <g key={key} role="button" tabIndex={0} aria-label={`Edit ${PANEL_LABELS[key]}`}
+            onClick={choose}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") { event.preventDefault(); choose(); }
+            }}
+            style={{ cursor: "pointer" }}>
             <path d={d}
               fill={getColor(key)}
-              stroke={isSelected ? "#2563eb" : hasData ? "#1d4ed8" : "#e2e8f0"}
-              strokeWidth={isSelected ? 2.5 : 1}
-              style={{ transition: "all 0.2s" }}
+              stroke={isSelected ? "#2563eb" : hasData ? "#1d4ed8" : "#94a3b8"}
+              strokeWidth={isSelected ? 3 : 1.6}
             />
             {hasData && (
               <>
                 <circle cx={cx} cy={cy} r={14} fill="rgba(15,23,42,0.85)" />
-                <text x={cx} y={cy+1} textAnchor="middle" dominantBaseline="central"
+                <text x={cx} y={cy + 1} textAnchor="middle" dominantBaseline="central"
                   fill={panelData[key].rrEnabled ? "#ef4444" : panelData[key].convEnabled ? "#f97316" : "#ffffff"}
                   fontSize={panelData[key].rrEnabled ? "8" : panelData[key].convEnabled ? "7" : "11"}
-                  fontWeight="700" fontFamily="monospace">
+                  fontWeight="700" fontFamily="monospace" style={{ pointerEvents: "none" }}>
                   {panelData[key].rrEnabled ? "R&R" : panelData[key].convEnabled ? "CONV" : panelData[key].count}
                 </text>
               </>
             )}
-            {!hasData && (
-              <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central"
-                fill="rgba(148,163,184,0.6)" fontSize="8" fontWeight="500" fontFamily="sans-serif"
+            {!hasData && words.map((word, index) => (
+              <text key={word} x={cx} y={words.length > 1 ? cy - 5 + index * 11 : cy} textAnchor="middle" dominantBaseline="central"
+                fill="#475569" fontSize="9" fontWeight="700" fontFamily="sans-serif"
                 style={{ pointerEvents: "none" }}>
-                {key}
+                {word}
               </text>
-            )}
+            ))}
           </g>
         );
       })}
@@ -213,7 +230,7 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
                   const isPast = i < selectedRangeIdx;
                   const isInvalid = r[size] === 0;
                   return (
-                    <button key={r.range} onClick={() => setSelectedRange(r.range)}
+                    <button key={r.range} type="button" aria-label={`${r.range} dents`} onClick={() => setSelectedRange(r.range)}
                       style={{ ...S.rangeStep, ...(isActive ? S.rangeStepActive : {}), ...(isPast && !isInvalid ? S.rangeStepPast : {}) }}>
                       <div style={{
                         ...S.rangeStepDot,
@@ -639,10 +656,9 @@ function VehicleForm({ vehicleInfo, setVehicleInfo, onClose }) {
 }
 
 
-const EMPTY_VEHICLE = { owner: "", year: "", make: "", model: "", vin: "", claim: "" };
-const DRAFT_KEY = "hailspec.draft.v1";
+const EMPTY_VEHICLE = blankVehicle();
 
-function LeadCapture({ summary }) {
+function LeadCapture({ summary, onFormClosed }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
@@ -716,7 +732,7 @@ function LeadCapture({ summary }) {
               <div style={S.ghlTitle}>Send to NTX Hail</div>
               <p style={S.ghlHint}>Check the consent boxes, then submit the form.</p>
             </div>
-            <button type="button" onClick={() => setEmbedUrl("")} style={S.ghlClose}>Close</button>
+            <button type="button" onClick={() => { setEmbedUrl(""); onFormClosed?.(); }} style={S.ghlClose}>Close</button>
           </div>
           <iframe title="NTX Hail estimate form" src={embedUrl} style={S.ghlFrame} />
         </div>
@@ -738,36 +754,83 @@ function HailEstimator() {
   const [hydrated, setHydrated] = useState(false);
   const [saveStatus, setSaveStatus] = useState("idle");
   const [carrierId, setCarrierId] = useState("state_farm");
+  const [estimateId, setEstimateId] = useState("");
+  const [savedEstimates, setSavedEstimates] = useState([]);
+  const [showSaved, setShowSaved] = useState(false);
+  const [exportNote, setExportNote] = useState("");
+  const [finishedNote, setFinishedNote] = useState("");
+  const draftRef = useRef(null);
   const activeCarrier = CARRIERS.find((c) => c.id === carrierId) || CARRIERS[0];
+  draftRef.current = estimateId
+    ? { id: estimateId, updatedAt: new Date().toISOString(), vehicleInfo, panelData, carrierId, photos }
+    : null;
+
+  const persistDraft = useCallback((draft) => {
+    if (!draft?.id) return;
+    const write = (value) => localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(value));
+    try {
+      write(draft);
+      setSaveStatus("saved");
+    } catch (err) {
+      try {
+        write({ ...draft, photos: [] });
+        setSaveStatus("saved");
+      } catch (again) {
+        console.error("[HailSpec] Could not save the draft", again);
+        setSaveStatus("error");
+      }
+    }
+  }, []);
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(DRAFT_KEY);
-      if (raw) {
-        const draft = JSON.parse(raw);
-        if (draft.vehicleInfo) setVehicleInfo({ ...EMPTY_VEHICLE, ...draft.vehicleInfo });
-        if (draft.panelData && typeof draft.panelData === "object") setPanelData(draft.panelData);
-        if (draft.carrierId) setCarrierId(draft.carrierId);
+      const draft = parseDraft(localStorage.getItem(DRAFT_STORAGE_KEY));
+      if (draft) {
+        setEstimateId(draft.id);
+        setVehicleInfo(draft.vehicleInfo);
+        setPanelData(draft.panelData);
+        setCarrierId(draft.carrierId);
+        setPhotos(draft.photos);
+      } else {
+        setEstimateId(createEstimateId());
       }
+      setSavedEstimates(parseSavedEstimates(localStorage.getItem(SAVED_STORAGE_KEY)));
     } catch (err) {
       console.error("[HailSpec] Could not read the saved draft", err);
+      setEstimateId(createEstimateId());
     }
     setHydrated(true);
   }, []);
 
   useEffect(() => {
-    if (!hydrated) return;
-    const timer = setTimeout(() => {
-      try {
-        localStorage.setItem(DRAFT_KEY, JSON.stringify({ vehicleInfo, panelData, carrierId }));
-        setSaveStatus("saved");
-      } catch (err) {
-        console.error("[HailSpec] Could not save the draft", err);
-        setSaveStatus("error");
-      }
-    }, 400);
+    if (!hydrated || !estimateId) return undefined;
+    setSaveStatus("saving");
+    const timer = setTimeout(() => persistDraft(draftRef.current), 200);
     return () => clearTimeout(timer);
-  }, [hydrated, vehicleInfo, panelData, carrierId]);
+  }, [hydrated, estimateId, vehicleInfo, panelData, carrierId, photos, persistDraft]);
+
+  useEffect(() => {
+    if (!hydrated) return undefined;
+    const flush = () => persistDraft(draftRef.current);
+    window.addEventListener("pagehide", flush);
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+  }, [hydrated, persistDraft]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem(SAVED_STORAGE_KEY, JSON.stringify(savedEstimates));
+    } catch (err) {
+      console.error("[HailSpec] Could not save the estimate list", err);
+    }
+  }, [hydrated, savedEstimates]);
 
   const handleSavePanel = useCallback((panel, data) => setPanelData((prev) => ({ ...prev, [panel]: data })), []);
   const handleDeletePanel = useCallback((panel) => setPanelData((prev) => {
@@ -776,15 +839,49 @@ function HailEstimator() {
     return next;
   }), []);
 
-  const handleNewEstimate = () => {
-    const hasWork = activePanels(panelData).length > 0 || vehicleInfo.owner || vehicleInfo.vin || vehicleInfo.make;
-    if (hasWork && !window.confirm("Start a new estimate? This clears the one saved on this phone.")) return;
+  const currentEstimate = { id: estimateId, vehicleInfo, panelData, carrierId, photos };
+
+  const startBlankEstimate = () => {
     setPanelData({});
-    setVehicleInfo(EMPTY_VEHICLE);
+    setVehicleInfo(blankVehicle());
     setCarrierId("state_farm");
     setPhotos([]);
     setView("estimate");
-    try { localStorage.removeItem(DRAFT_KEY); } catch (err) { /* ignore quota */ }
+    setSelectedPanel(null);
+    setShowVehicleForm(false);
+    setShowSaved(false);
+    setExportNote("");
+    setFinishedNote("");
+    setEmailTo("");
+    setEstimateId(createEstimateId());
+  };
+
+  const handleNewEstimate = () => {
+    if (estimateHasWork(currentEstimate)) {
+      const ok = window.confirm("Start a new estimate? This one stays in Saved estimates.");
+      if (!ok) return;
+      setSavedEstimates((list) => archiveEstimate(list, currentEstimate));
+    }
+    startBlankEstimate();
+  };
+
+  const handleOpenSaved = (id) => {
+    const result = openSavedEstimate(savedEstimates, currentEstimate, id);
+    if (!result.estimate) return;
+    setSavedEstimates(result.saved);
+    setEstimateId(result.estimate.id);
+    setVehicleInfo(result.estimate.vehicleInfo);
+    setPanelData(result.estimate.panelData);
+    setCarrierId(result.estimate.carrierId);
+    setPhotos(result.estimate.photos);
+    setView("estimate");
+    setSelectedPanel(null);
+    setShowSaved(false);
+    setFinishedNote("");
+  };
+
+  const handleRemoveSaved = (id) => {
+    setSavedEstimates((list) => list.filter((item) => item.id !== id));
   };
 
   const handleCarrier = (nextId) => {
@@ -799,7 +896,6 @@ function HailEstimator() {
   };
 
   const panels = activePanels(panelData);
-  const hasDraft = panels.length > 0 || !!(vehicleInfo.owner || vehicleInfo.vin || vehicleInfo.make || vehicleInfo.year);
   const grandTotal = grandTotalOf(panelData);
   const totalDents = maxDentCount(panelData);
   const summary = buildEstimateSummary({
@@ -809,36 +905,48 @@ function HailEstimator() {
     grandTotal,
   });
 
-  const handleDownloadReport = () => {
-    const html = generateReportHTML(vehicleInfo, panelData, photos, grandTotal, activeCarrier.label);
-    const blob = new Blob([html], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    const vehicle = [vehicleInfo.year, vehicleInfo.make, vehicleInfo.model].filter(Boolean).join("_") || "Report";
-    link.href = url;
-    link.download = `NTXHail_Estimate_${vehicle}.html`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  const handleDownloadReport = async () => {
+    setExportNote("");
+    try {
+      const bytes = buildEstimatePdf({
+        vehicleInfo,
+        panelData,
+        carrierLabel: activeCarrier.label,
+        grandTotal,
+        photos,
+      });
+      const filename = estimatePdfName(vehicleInfo);
+      const blob = new Blob([bytes], { type: "application/pdf" });
+      const file = new File([blob], filename, { type: "application/pdf" });
+      const touch = navigator.maxTouchPoints > 0;
+      if (touch && typeof navigator.canShare === "function" && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: "NTX Hail estimate" });
+          setExportNote("Use the share sheet to save the PDF.");
+          return;
+        } catch (err) {
+          if (err && err.name === "AbortError") return;
+        }
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.rel = "noopener";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2500);
+      setExportNote("PDF downloaded.");
+    } catch (err) {
+      console.error("[HailSpec] PDF download failed", err);
+      setExportNote("Could not create the PDF. Use Print, then save it as a PDF.");
+    }
   };
 
   const handlePrint = () => {
-    const html = generateReportHTML(vehicleInfo, panelData, photos, grandTotal, activeCarrier.label);
-    try {
-      const iframe = document.createElement("iframe");
-      iframe.style.cssText = "position:fixed;top:-10000px;left:-10000px;width:800px;height:600px;";
-      document.body.appendChild(iframe);
-      iframe.contentDocument.open();
-      iframe.contentDocument.write(html);
-      iframe.contentDocument.close();
-      setTimeout(() => {
-        try { iframe.contentWindow.print(); } catch (err) { handleDownloadReport(); }
-        setTimeout(() => { try { document.body.removeChild(iframe); } catch (err) { /* already gone */ } }, 1000);
-      }, 500);
-    } catch (err) {
-      handleDownloadReport();
-    }
+    setExportNote("");
+    window.print();
   };
 
   const handleEmail = () => {
@@ -890,9 +998,21 @@ function HailEstimator() {
 
   const S = styles;
   const vehicleLabel = [vehicleInfo.year, vehicleInfo.make, vehicleInfo.model].filter(Boolean).join(" ");
+  const report = reportDocument({ vehicleInfo, panelData, carrierLabel: activeCarrier.label, grandTotal });
+  const saveLabel = saveStatus === "error" ? "Not saved" : saveStatus === "saved" ? "Saved on this phone" : saveStatus === "saving" ? "Saving" : "by NTX Hail";
+
+  if (!hydrated) {
+    return (
+      <div style={S.app} className="app-screen" role="status">
+        <header style={S.header}><div style={S.logoText}>HAILSPEC</div></header>
+        <p style={{ padding: 24, color: "#334155", fontSize: 16 }}>Loading your estimate…</p>
+      </div>
+    );
+  }
 
   return (
-    <div style={S.app}>
+    <>
+    <div style={S.app} className="app-screen">
       <header style={S.header}>
         <div style={S.headerLeft}>
           <div style={S.logo}>
@@ -903,13 +1023,19 @@ function HailEstimator() {
             </svg>
             <div style={{ minWidth: 0 }}>
               <div style={S.logoText}>HAILSPEC</div>
-              <div style={S.logoSub}>{hasDraft && saveStatus === "error" ? "Not saved" : hasDraft && saveStatus === "saved" ? "Saved" : "by NTX Hail"}</div>
+              <div style={S.logoSub}>{saveLabel}</div>
             </div>
           </div>
         </div>
-        <button type="button" onClick={handleNewEstimate} style={S.vehicleBtn}>New</button>
+        <a href="https://www.ntxhail.com" style={S.siteLink}>Back to NTX Hail</a>
       </header>
       <div style={S.accentBar}/>
+      <div style={S.actionRow}>
+        <button type="button" onClick={handleNewEstimate} style={S.newEstimateBtn}>New estimate</button>
+        <button type="button" onClick={() => setShowSaved(true)} style={S.savedBtn} aria-haspopup="dialog">
+          Saved{savedEstimates.length > 0 ? ` ${savedEstimates.length}` : ""}
+        </button>
+      </div>
 
       {(vehicleInfo.owner || vehicleInfo.year || vehicleInfo.make) && !showVehicleForm && (
         <button type="button" onClick={() => setShowVehicleForm(true)} style={S.customerBar}>
@@ -968,25 +1094,11 @@ function HailEstimator() {
               <button type="button" onClick={() => setShowVehicleForm((open) => !open)} style={S.inlineBtn}>Vehicle</button>
             </div>
             <CarSilhouette panelData={panelData} selectedPanel={selectedPanel} onSelectPanel={setSelectedPanel} />
+            <p style={S.tapHint}>{panels.length ? "Tap a panel again to change it." : "Tap a panel on the vehicle to add damage."}</p>
             <div style={S.legend}>
               {[["None", "#f1f5f9"], ["Low", "rgba(37,99,235,0.35)"], ["Med", "rgba(59,130,246,0.5)"], ["High", "rgba(249,115,22,0.55)"], ["Severe", "rgba(220,38,38,0.65)"]].map(([label, color]) => (
                 <div key={label} style={S.legendItem}><div style={{ ...S.legendDot, background: color, border: "1px solid #e2e8f0" }} /><span>{label}</span></div>
               ))}
-            </div>
-          </div>
-          <div style={S.section}>
-            <div style={S.sectionLabel}>Or pick a panel</div>
-            <div style={S.panelPicker}>
-              {Object.keys(PANEL_LABELS).map((key) => {
-                const data = panelData[key];
-                const active = data && (data.count > 0 || data.rrEnabled || data.convEnabled);
-                return (
-                  <button key={key} type="button" onClick={() => setSelectedPanel(key)} style={{ ...S.panelPickerBtn, ...(active ? S.panelPickerBtnOn : {}) }}>
-                    <span style={S.panelPickerName}>{PANEL_LABELS[key]}</span>
-                    <span style={S.panelPickerPrice}>{active ? `$${Number(data.totalPrice || 0).toLocaleString("en-US")}` : "Add"}</span>
-                  </button>
-                );
-              })}
             </div>
           </div>
           <div style={S.section}><div style={S.sectionLabel}>Photos</div><CameraCapture photos={photos} setPhotos={setPhotos} /></div>
@@ -1048,18 +1160,25 @@ function HailEstimator() {
                 </div>
               </div>
               <p style={S.disclaimer}>Max dents adds the top of each dent range. It is not an exact dent count. {ESTIMATE_DISCLAIMER}</p>
-              <LeadCapture summary={summary} />
+              {finishedNote && <p style={S.leadOk}>{finishedNote}</p>}
+              <LeadCapture summary={summary} onFormClosed={() => setFinishedNote("The form is open for you to submit. This estimate stays saved on this phone.")} />
               <div style={S.section}>
                 <div style={S.sectionLabel}>Export</div>
                 <div style={S.exportStack}>
                   <button type="button" onClick={handlePrint} style={S.exportBtn}>Print</button>
-                  <button type="button" onClick={handleDownloadReport} style={S.exportBtn}>Download</button>
+                  <button type="button" onClick={handleDownloadReport} style={S.exportBtn}>Download PDF</button>
                 </div>
+                {exportNote && <p style={S.leadOk}>{exportNote}</p>}
                 <label style={S.leadLabel}>Email the summary
                   <input type="email" placeholder="recipient@email.com" value={emailTo} onChange={(e) => setEmailTo(e.target.value)} autoComplete="email" style={S.leadInput} />
                 </label>
                 <button type="button" onClick={handleEmail} disabled={!emailTo} style={{ ...S.exportBtn, opacity: emailTo ? 1 : 0.45 }}>Email</button>
                 {showEmailDone && <div style={S.leadOk}>Your mail app opened. Review it there before you send.</div>}
+              </div>
+              <div style={S.nextCard}>
+                <div style={S.sectionLabel}>Another vehicle</div>
+                <p style={S.leadIntro}>Keep this estimate in Saved, then start a blank one for the next car.</p>
+                <button type="button" onClick={handleNewEstimate} style={{ ...S.newEstimateBtn, width: "100%" }}>New estimate</button>
               </div>
               {photos.length > 0 && (
                 <div style={S.section}>
@@ -1078,7 +1197,83 @@ function HailEstimator() {
       {selectedPanel && (
         <PanelEditor panel={selectedPanel} data={panelData[selectedPanel]} carrierId={carrierId} onSave={handleSavePanel} onDelete={handleDeletePanel} onClose={() => setSelectedPanel(null)} />
       )}
+      {showSaved && (
+        <div style={S.modalOverlay} role="dialog" aria-modal="true" aria-label="Saved estimates" onClick={() => setShowSaved(false)}>
+          <div style={S.modalContent} onClick={(event) => event.stopPropagation()}>
+            <div style={S.modalHeader}>
+              <div>
+                <div style={S.modalTitle}>Saved estimates</div>
+                <div style={S.modalSubtitle}>Stored on this phone</div>
+              </div>
+              <button type="button" onClick={() => setShowSaved(false)} style={S.closeBtn} aria-label="Close saved estimates">✕</button>
+            </div>
+            <div style={S.modalBody}>
+              {savedEstimates.length === 0 ? (
+                <div style={S.emptyState}>
+                  <div style={{ fontWeight: 700, marginBottom: 6 }}>No saved estimates yet</div>
+                  <div>Starting a new estimate keeps the one you were writing.</div>
+                </div>
+              ) : savedEstimates.map((item) => {
+                const when = new Date(item.updatedAt);
+                const date = Number.isNaN(when.getTime()) ? "" : when.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                const total = grandTotalOf(item.panelData);
+                const count = activePanels(item.panelData).length;
+                return (
+                  <div key={item.id} style={S.savedRow}>
+                    <button type="button" onClick={() => handleOpenSaved(item.id)} style={S.savedOpen}>
+                      <span style={S.logPanel}>{estimateTitle(item)}</span>
+                      <span style={S.logMeta}>{count} panel{count === 1 ? "" : "s"} · ${total.toLocaleString("en-US")}{date ? ` · ${date}` : ""}</span>
+                    </button>
+                    <button type="button" onClick={() => handleRemoveSaved(item.id)} style={S.savedRemove}>Remove</button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+    <article className="print-sheet" aria-hidden="true">
+      <header className="print-header">
+        <div className="print-brand">NTX HAIL</div>
+        <div className="print-kicker">HailSpec estimate</div>
+        <p>{report.carrier} · {report.date}</p>
+      </header>
+      <dl className="print-meta">
+        <div><dt>Owner</dt><dd>{report.owner}</dd></div>
+        <div><dt>Vehicle</dt><dd>{report.vehicle}</dd></div>
+        <div><dt>VIN</dt><dd>{report.vin}</dd></div>
+        <div><dt>Claim #</dt><dd>{report.claim}</dd></div>
+      </dl>
+      <table>
+        <thead><tr><th>Panel</th><th>Damage</th><th>Price</th></tr></thead>
+        <tbody>
+          {report.panels.length === 0 ? (
+            <tr><td colSpan={3}>No panels estimated.</td></tr>
+          ) : report.panels.map((panel) => (
+            <tr key={panel.name}>
+              <td>{panel.name}</td>
+              <td>{panel.detail}</td>
+              <td className="amt">${panel.amount.toLocaleString("en-US")}</td>
+            </tr>
+          ))}
+          <tr className="print-total">
+            <td colSpan={2}>Grand total</td>
+            <td className="amt">${report.grandTotal.toLocaleString("en-US")}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="print-disclaimer">{report.disclaimer}</p>
+      {photos.some((photo) => typeof photo?.url === "string" && photo.url.startsWith("data:image/")) && (
+        <div className="print-photos">
+          {photos.filter((photo) => typeof photo?.url === "string" && photo.url.startsWith("data:image/")).map((photo, index) => (
+            <img key={index} src={photo.url} alt="" />
+          ))}
+        </div>
+      )}
+      <p className="print-footer">Generated by HailSpec. ntxhail.com</p>
+    </article>
+    </>
   );
 }
 
@@ -1095,7 +1290,7 @@ const styles = {
     overflowX: "hidden",
   },
   header: {
-    display: "flex", alignItems: "center", justifyContent: "space-between",
+    display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap",
     padding: "12px 16px",
     gap: 8,
     minHeight: 64,
@@ -1111,7 +1306,16 @@ const styles = {
   headerLeft: { display: "flex", alignItems: "center", gap: 12 },
   logo: { display: "flex", alignItems: "center", gap: 10 },
   logoText: { fontWeight: 900, fontSize: 17, letterSpacing: "1.5px", color: "#ffffff", lineHeight: 1 },
-  logoSub: { fontSize: 9, color: "#93c5fd", fontWeight: 700, letterSpacing: "1px", textTransform: "uppercase" },
+  logoSub: { fontSize: 12, color: "#93c5fd", fontWeight: 700, letterSpacing: "0.2px", marginTop: 2 },
+  siteLink: { minHeight: 44, display: "inline-flex", alignItems: "center", color: "#dbeafe", fontWeight: 700, fontSize: 14, textDecoration: "none", padding: "8px 2px", flexShrink: 0 },
+  actionRow: { display: "flex", gap: 8, padding: "10px 16px", background: "#ffffff", borderBottom: "1px solid #e2e8f0" },
+  newEstimateBtn: { flex: 1.4, minHeight: 48, background: "#2563eb", border: "none", borderRadius: 10, padding: "12px 14px", color: "#ffffff", fontSize: 16, fontWeight: 800, cursor: "pointer" },
+  savedBtn: { flex: 1, minHeight: 48, background: "#f8fafc", border: "1.5px solid #cbd5e1", borderRadius: 10, padding: "12px 14px", color: "#0f172a", fontSize: 16, fontWeight: 800, cursor: "pointer" },
+  tapHint: { margin: "8px 0 0", textAlign: "center", color: "#334155", fontSize: 14, fontWeight: 600, lineHeight: 1.4 },
+  nextCard: { background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 14, padding: 16, marginBottom: 16 },
+  savedRow: { display: "flex", alignItems: "stretch", gap: 8, marginBottom: 8 },
+  savedOpen: { flex: 1, minHeight: 56, textAlign: "left", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 12, padding: "12px 14px", cursor: "pointer", color: "#0f172a", display: "flex", flexDirection: "column", gap: 4 },
+  savedRemove: { minWidth: 44, minHeight: 56, padding: "8px 12px", borderRadius: 12, border: "1px solid #fecaca", background: "#fef2f2", color: "#b91c1c", fontWeight: 700, cursor: "pointer" },
   headerBadge: {
     fontSize: 10, color: "#94a3b8", fontWeight: 600, letterSpacing: "0.5px",
     background: "rgba(255,255,255,0.08)", padding: "3px 8px", borderRadius: 4,

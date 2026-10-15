@@ -10,6 +10,13 @@ import {
   buildEstimateSummary,
   fitSummaryForUrl,
   buildGhlEmbedUrl,
+  buildEstimatePdf,
+  reportDocument,
+  archiveEstimate,
+  openSavedEstimate,
+  parseDraft,
+  estimateHasWork,
+  estimatePdfName,
   validateLead,
   parseGhlForm,
   ESTIMATE_DISCLAIMER,
@@ -184,6 +191,53 @@ test("a form id and the public embed URL parse to the same form", () => {
   assert.equal(live.embedUrl, "https://api.leadconnectorhq.com/widget/form/g99Lxl9E4vJX8OfrSWWt");
 });
 
+test("a new estimate keeps the previous one in the saved list", () => {
+  const current = {
+    id: "est_current",
+    vehicleInfo: { year: "2020", make: "Toyota", model: "Camry", owner: "Ada", vin: "", claim: "" },
+    panelData: { HOOD: { count: 5, selectedRange: "1 - 5", size: "DIME", totalPrice: 80 } },
+    carrierId: "state_farm",
+    photos: [],
+  };
+  assert.equal(estimateHasWork(current), true);
+  assert.equal(estimateHasWork({ vehicleInfo: { year: "", make: "", model: "", owner: "", vin: "", claim: "" }, panelData: {} }), false);
+  const saved = archiveEstimate([], current);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].id, "est_current");
+  assert.equal(saved[0].panelData.HOOD.totalPrice, 80);
+  const untouched = archiveEstimate(saved, { id: "est_blank", vehicleInfo: { owner: "" }, panelData: {} });
+  assert.equal(untouched.length, 1);
+  const swapped = openSavedEstimate(saved, { id: "est_other", vehicleInfo: { owner: "Bea" }, panelData: {}, carrierId: "state_farm" }, "est_current");
+  assert.equal(swapped.estimate.vehicleInfo.make, "Toyota");
+  assert.equal(swapped.saved.some((item) => item.vehicleInfo.owner === "Bea"), true);
+  assert.equal(swapped.saved.some((item) => item.id === "est_current"), false);
+  const restored = parseDraft(JSON.stringify(current));
+  assert.equal(restored.id, "est_current");
+  assert.equal(estimatePdfName(current.vehicleInfo), "NTXHail_Estimate_2020_Toyota_Camry.pdf");
+});
+
+test("the downloaded estimate is a real PDF with the panel total", () => {
+  const when = new Date("2026-10-15T12:00:00Z");
+  const input = {
+    vehicleInfo: { year: "2020", make: "Toyota", model: "Camry", owner: "Ada", vin: "4T1BF1FK5HU123456", claim: "CLM1" },
+    panelData: { HOOD: { count: 5, selectedRange: "1 - 5", size: "DIME", totalPrice: 80 } },
+    carrierLabel: "State Farm",
+    grandTotal: 80,
+  };
+  const doc = reportDocument(input, when);
+  assert.equal(doc.panels[0].name, "Hood");
+  assert.match(doc.panels[0].detail, /1 - 5 dime dents/);
+  const bytes = buildEstimatePdf(input, when);
+  const text = new TextDecoder().decode(bytes);
+  assert.equal(text.startsWith("%PDF-1.4"), true);
+  assert.equal(text.trimEnd().endsWith("%%EOF"), true);
+  assert.match(text, /Hood: 1 - 5 dime dents - \$80/);
+  assert.match(text, /Grand total: \$80/);
+  assert.match(text, /repair estimate only/);
+  assert.equal(/waive your deductible/i.test(text), false);
+  assert.equal(text.includes("startxref"), true);
+});
+
 test("the page and source do not show a phone number or a login gate", () => {
   const files = ["index.html", "src/app.jsx", "src/config.js", "src/hail-logic.js"];
   const phone = /(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}/;
@@ -198,4 +252,10 @@ test("the page and source do not show a phone number or a login gate", () => {
   const page = fs.readFileSync("index.html", "utf8");
   assert.equal(page.includes("app.js"), true);
   assert.equal(page.includes("babel"), false);
+  assert.match(page, /@media print/);
+  const app = fs.readFileSync("src/app.jsx", "utf8");
+  assert.equal(app.includes("Or pick a panel"), false);
+  assert.equal(app.includes("https://www.ntxhail.com"), true);
+  assert.equal(app.includes("window.print"), true);
+  assert.equal(app.includes("application/pdf"), true);
 });
