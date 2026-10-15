@@ -21,6 +21,38 @@
     button { touch-action: manipulation; }
     input, select, textarea { font-size: 16px !important; }
     img, svg { max-width: 100%; }
+    a:focus-visible, button:focus-visible, [role="button"]:focus-visible {
+      outline: 3px solid #2563eb;
+      outline-offset: 2px;
+    }
+    .print-sheet { display: none; }
+    @media print {
+      html, body, #root { overflow: visible !important; background: #fff !important; height: auto !important; max-width: none !important; }
+      .app-screen { display: none !important; }
+      .print-sheet {
+        display: block !important;
+        color: #1e293b;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+      .print-brand { font-size: 20px; font-weight: 900; letter-spacing: 1px; }
+      .print-kicker { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #2563eb; }
+      .print-header { border-bottom: 3px solid #0a1628; padding-bottom: 12px; margin-bottom: 16px; }
+      .print-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; margin: 0 0 16px; }
+      .print-meta dt { color: #64748b; }
+      .print-meta dd { margin: 0; font-weight: 700; overflow-wrap: anywhere; }
+      .print-sheet table { width: 100%; border-collapse: collapse; }
+      .print-sheet th { background: #0a1628; color: #fff; text-align: left; padding: 8px; font-size: 11px; letter-spacing: 0.4px; text-transform: uppercase; }
+      .print-sheet td { border-bottom: 1px solid #e2e8f0; padding: 8px; vertical-align: top; }
+      .print-sheet .amt { text-align: right; font-weight: 700; white-space: nowrap; }
+      .print-total td { border-top: 3px solid #0a1628; font-weight: 800; font-size: 14px; }
+      .print-disclaimer { margin-top: 14px; color: #334155; }
+      .print-photos { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+      .print-photos img { width: 140px; height: 100px; object-fit: cover; }
+      .print-footer { margin-top: 18px; color: #64748b; font-size: 11px; }
+      @page { margin: 0.6in; }
+    }
   </style>
 </head>
 <body>

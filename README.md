@@ -2,7 +2,11 @@
 
 HailSpec is the NTX Hail estimator. Anyone can open it and price hail damage on a vehicle. There is no account and no login. The estimate in progress is saved on the phone.
 
-Pick a carrier, enter the vehicle, tap each damaged panel, and set the dent range and size. State Farm has the working price matrix. Other carriers stay at $0 until a matrix is added, and those panels should be written as conventional repair or remove-and-replace. Review the total, then send your name and phone, with an optional email, to NTX Hail.
+Pick a carrier, enter the vehicle, and tap each damaged panel on the vehicle diagram. State Farm has the working price matrix. Other carriers stay at $0 until a matrix is added, and those panels should be written as conventional repair or remove-and-replace. Review the total, then send your name and phone, with an optional email, to NTX Hail.
+
+The estimate in progress is saved on the phone. Refreshing or closing the tab brings it back. **New estimate** keeps that one in **Saved** and starts a blank customer, vehicle, and damage sheet. **Back to NTX Hail** returns to https://www.ntxhail.com.
+
+**Print** uses a clean print layout. **Download PDF** saves a PDF of the estimate. On a phone, that file opens in the share sheet when the browser allows it.
 
 The estimate is repair pricing only. It is not a promise to waive a deductible, pay a rebate, or cover any part of an insurance claim.
 
@@ -50,4 +54,4 @@ npm test
 npm run build
 ```
 
-`npm test` checks the price matrix, the carrier fallback, VIN decode, the report, and the prefilled form link. `npm run build` writes `app.js`.
+`npm test` checks the price matrix, the carrier fallback, VIN decode, the report, saved estimates, the PDF, and the prefilled form link. `npm run build` writes `app.js`. `npm run test:e2e` runs Playwright against the built page.
