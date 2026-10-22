@@ -1,10 +1,43 @@
 // Pricing, estimates, and the GoHighLevel lead payload.
 // No API tokens live in this file.
-
-export const ESTIMATE_DISCLAIMER =
-  "This is a repair estimate only. It is not a promise to waive a deductible, pay a rebate, or cover any part of an insurance claim.";
+import { renderCccPdf } from "./ccc-pdf.js";
 
 export const GHL_SUMMARY_LIMIT = 1500;
+
+export const SHOP = {
+  web: "WWW.NTXHAIL.COM",
+  legal: "Dakine Investments LLC DBA NTX Hail",
+  federalId: "84-5170282",
+  address: "904 S Woodrow, Denton, TX 76205",
+};
+
+export const SIZE_SHORT = { DIME: "dime", NICKEL: "nickel", QUARTER: "quarter", HALF: "half" };
+
+export const PANEL_CCC_NAME = {
+  HOOD: "Hood", ROOF: "Roof", TRUNK: "Trunk Lid",
+  LFF: "LT Fender", RFF: "RT Fender",
+  LFD: "LT Front Door", RFD: "RT Front Door",
+  LRD: "LT Rear Door", RRD: "RT Rear Door",
+  LQ: "LT Quarter Panel", RQ: "RT Quarter Panel",
+  LRAIL: "LT Rail", RRAIL: "RT Rail",
+  LT_CAB: "LT Cab Corner", RT_CAB: "RT Cab Corner",
+  LT_BED: "LT Bed Side", RT_BED: "RT Bed Side",
+  TAILGATE: "Tailgate", PILLARS: "Pillars", OTHER: "Other",
+};
+
+export const PANEL_GROUP = {
+  HOOD: "HOOD", LFF: "FENDER", RFF: "FENDER", ROOF: "ROOF",
+  LRAIL: "RAIL", RRAIL: "RAIL",
+  LFD: "FRONT DOOR", RFD: "FRONT DOOR",
+  LRD: "REAR DOOR", RRD: "REAR DOOR",
+  LQ: "QUARTER PANEL", RQ: "QUARTER PANEL",
+  TRUNK: "TRUNK LID",
+  LT_CAB: "CAB CORNER", RT_CAB: "CAB CORNER",
+  LT_BED: "BED SIDE", RT_BED: "BED SIDE",
+  TAILGATE: "TAILGATE", PILLARS: "PILLARS", OTHER: "OTHER",
+};
+
+const GROUP_ORDER = ["HOOD", "FENDER", "RAIL", "ROOF", "FRONT DOOR", "REAR DOOR", "QUARTER PANEL", "TRUNK LID", "CAB CORNER", "BED SIDE", "TAILGATE", "PILLARS", "OTHER"];
 
 export const CARRIERS = [
   { id: "state_farm",  label: "State Farm",  color: "#dc2626", badge: "SF"  },
@@ -332,9 +365,45 @@ export function largestPricedSize(counts) {
   return null;
 }
 
+export function majorityFromCounts(sizeCounts) {
+  const counts = normalizeSizeCounts(sizeCounts);
+  let best = null;
+  let bestN = 0;
+  for (const size of ["HALF", "QUARTER", "NICKEL", "DIME"]) {
+    if (counts[size] > bestN) {
+      bestN = counts[size];
+      best = size;
+    }
+  }
+  return best ? { size: best, count: bestN } : null;
+}
+
+export function dentSize(data) {
+  if (!data) return "";
+  if (data.sizeCounts && totalSizeCount(data.sizeCounts) > 0) {
+    return majorityFromCounts(data.sizeCounts)?.size || "";
+  }
+  return DENT_SIZES.includes(data.size) ? data.size : "";
+}
+
+export function dentCount(data) {
+  if (!data) return 0;
+  if (data.sizeCounts && totalSizeCount(data.sizeCounts) > 0) {
+    return majorityFromCounts(data.sizeCounts)?.count || 0;
+  }
+  return Math.max(0, Math.min(999, Math.round(Number(data.count) || 0)));
+}
+
+export function pdrNote(data) {
+  const count = dentCount(data);
+  const size = dentSize(data);
+  if (count > 0 && size) return `PDR ${count} ${SIZE_SHORT[size]}`;
+  return "";
+}
+
 export function hasExactCounts(data) {
   if (!data) return false;
-  if (data.sizeCounts && DENT_SIZES.some((size) => Number(data.sizeCounts[size]) > 0)) return true;
+  if (pdrNote(data)) return true;
   return Number(data.osDentCount) > 0 || Number(data.doubleOsCount) > 0;
 }
 
@@ -366,58 +435,47 @@ export function formatSizeList(counts, os = 0, doubleOs = 0) {
 }
 
 export function formatPanelDamage(data) {
-  const list = formatSizeList(data?.sizeCounts, data?.osDentCount, data?.doubleOsCount);
-  if (list.text) {
-    if (data?.rrEnabled) return `R&R — ${list.text}`;
-    if (data?.convEnabled) return `Conventional — ${list.text}`;
-    return list.text;
+  const parts = [];
+  if (data?.rrEnabled) parts.push("R&R");
+  else if (data?.convEnabled) parts.push("Conventional");
+  else {
+    const note = pdrNote(data);
+    if (note) parts.push(note);
   }
-  if (data?.rrEnabled) return "R&R";
-  if (data?.convEnabled) return "Conventional";
-  const size = (DENT_SIZE_LABELS[data?.size] || "").toLowerCase();
-  return `${data?.selectedRange || data?.count || 0} ${size} dents`.trim();
+  const over = Math.max(0, Math.round(Number(data?.osDentCount) || 0));
+  const dbl = Math.max(0, Math.round(Number(data?.doubleOsCount) || 0));
+  if (over > 0) parts.push(`PDR ${over} OS Dents`);
+  if (dbl > 0) parts.push(`PDR ${dbl} Double OS Dents`);
+  return parts.join(" · ");
 }
 
 export function formatPanelLine(key, data) {
   const name = PANEL_LABELS[key] || key;
   const price = `$${Number(data?.totalPrice || 0).toLocaleString("en-US")}`;
-  if (!hasExactCounts(data)) {
-    const how = data?.rrEnabled
-      ? "R&R"
-      : data?.convEnabled
-        ? "Conventional"
-        : `${data?.selectedRange || data?.count || 0} ${(DENT_SIZE_LABELS[data?.size] || "").toLowerCase()} dents`;
-    return `${name}: ${how} — ${price}`;
-  }
-  return `${name}: ${formatPanelDamage(data)} — ${price}`;
+  const how = formatPanelDamage(data) || "No dents entered";
+  return `${name}: ${how} — ${price}`;
 }
 
 export function vehicleSizeTotals(panelData) {
   const counts = { DIME: 0, NICKEL: 0, QUARTER: 0, HALF: 0 };
-  let os = 0;
-  let doubleOs = 0;
   let any = false;
   for (const data of Object.values(panelData || {})) {
-    if (!data || typeof data !== "object" || !data.sizeCounts) continue;
+    const size = dentSize(data);
+    const count = dentCount(data);
+    if (!size || count <= 0) continue;
     any = true;
-    for (const size of DENT_SIZES) counts[size] += Number(data.sizeCounts[size]) || 0;
-    os += Number(data.osDentCount) || 0;
-    doubleOs += Number(data.doubleOsCount) || 0;
+    counts[size] += count;
   }
-  const list = formatSizeList(counts, os, doubleOs);
+  const parts = DENT_SIZES.filter((size) => counts[size] > 0).map((size) => `${counts[size]} ${SIZE_SHORT[size]}`);
   return {
     counts,
-    os,
-    doubleOs,
     any,
-    text: any && list.text ? `Vehicle dent totals: ${list.text}` : "",
+    text: any ? `Vehicle dent totals: ${parts.join(", ")}` : "",
   };
 }
 
 export function panelDentTotal(data) {
-  if (!data) return 0;
-  if (data.sizeCounts && typeof data.sizeCounts === "object") return totalSizeCount(data.sizeCounts);
-  return Number(data.count) || 0;
+  return dentCount(data);
 }
 
 export function quotePanel(input) {
@@ -431,8 +489,14 @@ export function quotePanel(input) {
   let count;
   let selectedRange;
   if (usingCounts) {
-    count = totalSizeCount(sizeCounts);
-    size = largestPricedSize(sizeCounts) || "DIME";
+    const majority = majorityFromCounts(sizeCounts);
+    count = majority.count;
+    size = majority.size;
+    selectedRow = rows.find((row) => count >= row.min && count <= row.max) || null;
+    selectedRange = selectedRow ? selectedRow.range : null;
+  } else if (!input.selectedRange && Number(input.count) > 0 && input.size) {
+    size = DENT_SIZES.includes(input.size) ? input.size : "DIME";
+    count = Math.max(0, Math.min(999, Math.round(Number(input.count) || 0)));
     selectedRow = rows.find((row) => count >= row.min && count <= row.max) || null;
     selectedRange = selectedRow ? selectedRow.range : null;
   } else {
@@ -506,12 +570,18 @@ export const SAVED_ESTIMATE_LIMIT = 100;
 export const MAX_PHOTOS = 80;
 
 export function blankVehicle() {
-  return { owner: "", year: "", make: "", model: "", vin: "", claim: "" };
+  return {
+    owner: "", year: "", make: "", model: "", trim: "", vin: "",
+    mileage: "", license: "", plateState: "", color: "",
+    claim: "", customer: "", writtenBy: "", insured: "", policy: "",
+    lossDate: "", inspectionLocation: "", priorNotes: "",
+    typeOfLoss: "Comprehensive", pointOfImpact: "Hail",
+  };
 }
 
 export function estimateHasWork(estimate) {
   const vehicle = estimate?.vehicleInfo || {};
-  const named = ["owner", "vin", "make", "year", "model", "claim"].some((key) => String(vehicle[key] || "").trim());
+  const named = ["owner", "vin", "make", "year", "model", "trim", "claim", "customer", "writtenBy", "insured", "policy", "mileage", "license", "color", "priorNotes", "lossDate", "inspectionLocation"].some((key) => String(vehicle[key] || "").trim());
   const photos = Array.isArray(estimate?.photos) && estimate.photos.length > 0;
   return named || activePanels(estimate?.panelData).length > 0 || photos;
 }
@@ -524,7 +594,9 @@ export function normalizeVehicle(value) {
   const blank = blankVehicle();
   const source = value && typeof value === "object" ? value : {};
   const next = { ...blank };
-  for (const key of Object.keys(blank)) next[key] = String(source[key] ?? "");
+  for (const key of Object.keys(blank)) {
+    next[key] = source[key] == null ? String(blank[key] ?? "") : String(source[key]);
+  }
   return next;
 }
 
@@ -591,6 +663,9 @@ export function normalizeEstimate(value) {
     lead: normalizeLead(source.lead),
     queuedAt: String(source.queuedAt || ""),
     sentAt: String(source.sentAt || ""),
+    packetId: String(source.packetId || ""),
+    packetUrl: String(source.packetUrl || ""),
+    packetStatus: ["uploaded", "pending", "error"].includes(source.packetStatus) ? source.packetStatus : "",
   };
 }
 
@@ -654,7 +729,7 @@ export function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-export function buildEstimateSummary({ vehicleInfo = {}, panelData = {}, carrierLabel = "State Farm", grandTotal = 0, photos = [] } = {}) {
+export function buildEstimateSummary({ vehicleInfo = {}, panelData = {}, carrierLabel = "State Farm", grandTotal = 0, photos = [], packetUrl = "" } = {}) {
   const lines = activePanels(panelData).map(([key, data]) => formatPanelLine(key, data));
   const vehicle = vehicleLine(vehicleInfo) || "Vehicle not set";
   const parts = [
@@ -668,12 +743,12 @@ export function buildEstimateSummary({ vehicleInfo = {}, panelData = {}, carrier
   const totals = vehicleSizeTotals(panelData);
   if (totals.text) parts.push(totals.text);
   const photoCount = Array.isArray(photos) ? photos.length : 0;
-  if (photoCount > 0) parts.push(`Photos on phone: ${photoCount}. Share/Export sends the pictures. This form cannot attach them.`);
+  if (packetUrl) parts.push(`Photos and PDF: ${packetUrl}`);
+  else if (photoCount > 0) parts.push(`Photos on phone: ${photoCount}. They upload with this estimate when there is signal. Share/Export is the backup copy.`);
   parts.push("");
   parts.push(...(lines.length ? lines : ["No panels estimated."]));
   parts.push("");
   parts.push(`Grand total: $${Number(grandTotal || 0).toLocaleString("en-US")}`);
-  parts.push(ESTIMATE_DISCLAIMER);
   return parts.join("\n");
 }
 
@@ -708,10 +783,8 @@ function panelRowsHtml(panelData) {
     } else {
       lineNum += 1;
       totalPrice += (data.basePrice || 0);
-      const damage = hasExactCounts(data)
-        ? formatPanelDamage(data)
-        : `${data.selectedRange || data.count} ${(DENT_SIZE_LABELS[data.size] || "").toLowerCase()} dents`.trim();
-      html += `<tr><td class="ln">${lineNum}</td><td>PDR — ${escapeHtml(damage)}</td><td>1</td><td class="amt">$${Number(data.basePrice || 0).toLocaleString("en-US")}</td><td></td></tr>`;
+      const damage = formatPanelDamage(data) || "PDR";
+      html += `<tr><td class="ln">${lineNum}</td><td>${escapeHtml(damage)}</td><td>1</td><td class="amt">$${Number(data.basePrice || 0).toLocaleString("en-US")}</td><td></td></tr>`;
       (data.addons || []).forEach((name) => {
         const addon = ADDONS.find((item) => item.name === name);
         if (!addon) return;
@@ -806,175 +879,164 @@ export function generateReportHTML(vehicleInfo, panelData, photos, grandTotal, c
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>NTX Hail — Estimate</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Segoe UI',system-ui,sans-serif;color:#1e293b;padding:24px;max-width:800px;margin:0 auto;font-size:13px}.header{border-bottom:3px solid #0a1628;padding-bottom:20px;margin-bottom:24px}.brand-name{font-size:18px;font-weight:900;letter-spacing:1px;color:#0a1628}.brand-tag{font-size:11px;color:#2563eb;font-weight:700;letter-spacing:2px;text-transform:uppercase}.header p{color:#64748b;margin-top:4px;font-size:13px}.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;margin-bottom:24px;font-size:13px}.info-grid dt{color:#64748b;font-weight:500}.info-grid dd{font-weight:600;overflow-wrap:anywhere}table{width:100%;border-collapse:collapse;margin-bottom:20px}th{background:#0a1628;color:#f8fafc;padding:8px 10px;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.5px}td{padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:13px}.ln{width:36px;color:#94a3b8;font-weight:600;text-align:center;font-size:12px}.amt{text-align:right;font-weight:600;white-space:nowrap}.section-row td{background:#eff6ff;font-weight:800;font-size:13px;color:#1e3a5f;padding:8px 10px;border-bottom:2px solid #bfdbfe}.section-row-rr td{background:#fef2f2;font-weight:800;font-size:13px;color:#7f1d1d;padding:8px 10px;border-bottom:2px solid #fecaca}.addon-row td{color:#475569}.labor-row td{color:#1e293b}.rr-labor-row td{color:#dc2626}.subtotal-row td{border-top:2px solid #cbd5e1;font-weight:700;font-size:13px;padding:8px 10px}.total-row td{border-top:3px solid #0a1628;font-weight:800;font-size:15px;padding:10px}.total-row .amt{font-size:16px;color:#2563eb}.photos{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}.photos img{width:150px;max-width:100%;height:110px;object-fit:cover;border-radius:6px;border:1px solid #e2e8f0}.disclaimer{margin-top:16px;font-size:12px;color:#334155;line-height:1.5}.footer{margin-top:24px;padding-top:16px;border-top:1px solid #e2e8f0;font-size:11px;color:#94a3b8;text-align:center}@media print{body{padding:16px}}</style>
 </head><body>
-<div class="header"><div class="brand-name">NTX HAIL</div><div class="brand-tag">HailSpec Estimator</div><p>${escapeHtml(label)} Matrix Pricing — ${escapeHtml(date)}</p></div>
+<div class="header"><div class="brand-name">${escapeHtml(SHOP.web)}</div><div class="brand-tag">${escapeHtml(SHOP.legal)}</div><p>Federal ID ${escapeHtml(SHOP.federalId)} · ${escapeHtml(SHOP.address)}</p><p>${escapeHtml(label)} · ${escapeHtml(date)}</p></div>
 <dl class="info-grid"><dt>Owner</dt><dd>${escapeHtml(info.owner || "—")}</dd><dt>Vehicle</dt><dd>${escapeHtml(vehicleLine(info) || "—")}</dd><dt>VIN</dt><dd>${escapeHtml(info.vin || "—")}</dd><dt>Claim #</dt><dd>${escapeHtml(info.claim || "—")}</dd></dl>
 <table><thead><tr><th style="width:36px">Line</th><th>Operation</th><th>Qty</th><th style="text-align:right">Price $</th><th style="text-align:right">Labor $</th></tr></thead>
 <tbody>${rows}<tr class="subtotal-row"><td></td><td colspan="2">Subtotals</td><td class="amt">$${totalPrice.toLocaleString("en-US")}</td><td class="amt">$${totalLabor.toFixed(2)}</td></tr>
 <tr class="total-row"><td></td><td colspan="2">GRAND TOTAL</td><td colspan="2" class="amt">$${Number(grandTotal || 0).toLocaleString("en-US")}</td></tr></tbody></table>
-<p class="disclaimer">${escapeHtml(ESTIMATE_DISCLAIMER)}</p>
-${sizeTotals ? `<p class="disclaimer">${escapeHtml(sizeTotals)}</p>` : ""}
+${sizeTotals ? `<p>${escapeHtml(sizeTotals)}</p>` : ""}
 ${photoHtml}
 <div class="footer">Generated by HailSpec — NTX Hail — ${escapeHtml(date)}</div>
 </body></html>`;
 }
 
+function addonPhrase(data) {
+  const name = (data?.addons || []).find((item) => {
+    const addon = ADDONS.find((entry) => entry.name === item);
+    return addon && addon.type === "percent";
+  });
+  if (!name) return "";
+  const addon = ADDONS.find((entry) => entry.name === name);
+  return ` (${name}) +${Math.round(addon.value * 100)}%`;
+}
+
+export function buildEstimateLines(panelData) {
+  const grouped = new Map();
+  for (const [key, data] of activePanels(panelData)) {
+    const group = PANEL_GROUP[key] || "OTHER";
+    if (!grouped.has(group)) grouped.set(group, []);
+    grouped.get(group).push([key, data]);
+  }
+  const groups = [];
+  let lineNo = 0;
+  for (const group of GROUP_ORDER) {
+    if (!grouped.has(group)) continue;
+    const rows = [];
+    for (const [key, data] of grouped.get(group)) {
+      const name = PANEL_CCC_NAME[key] || PANEL_LABELS[key] || key;
+      const nonPdr = !!(data.rrEnabled || data.convEnabled);
+      if (!nonPdr) {
+        const os = Math.max(0, Math.round(Number(data.osDentCount) || 0));
+        const dbl = Math.max(0, Math.round(Number(data.doubleOsCount) || 0));
+        const osAmt = os * 50;
+        const dblAmt = dbl * 100;
+        const percentAmt = Math.max(0, roundMoney((Number(data.addonTotal) || 0) - osAmt - dblAmt));
+        let extended = roundMoney((Number(data.basePrice) || 0) + percentAmt);
+        if (!extended && !os && !dbl) extended = roundMoney(Number(data.totalPrice) || 0);
+        const note = pdrNote(data);
+        if (extended > 0 || note) {
+          lineNo += 1;
+          rows.push({ line: lineNo, oper: "PDR", description: `PDR ${name}${addonPhrase(data)}`, qty: "1", extended, labor: 0, paint: 0, note });
+        }
+        if (os > 0) {
+          lineNo += 1;
+          rows.push({ line: lineNo, oper: "PDR", description: `PDR ${os} OS Dents`, qty: String(os), extended: osAmt, labor: 0, paint: 0, note: "" });
+        }
+        if (dbl > 0) {
+          lineNo += 1;
+          rows.push({ line: lineNo, oper: "PDR", description: `PDR ${dbl} Double OS Dents`, qty: String(dbl), extended: dblAmt, labor: 0, paint: 0, note: "" });
+        }
+      } else {
+        const hours = data.rrEnabled ? Number(data.rrHours || 0) : Number(data.convHours || 0);
+        const cost = data.rrEnabled ? Number(data.rrCost || 0) : Number(data.convCost || 0);
+        lineNo += 1;
+        rows.push({
+          line: lineNo,
+          oper: data.rrEnabled ? "R&R" : "CONV",
+          description: name,
+          qty: hours.toFixed(1),
+          extended: 0,
+          labor: cost,
+          paint: 0,
+          note: "",
+        });
+      }
+      if (data.riEnabled && Number(data.riTotalCost) > 0) {
+        lineNo += 1;
+        rows.push({
+          line: lineNo,
+          oper: "R&I",
+          description: `${name} R&I`,
+          qty: Number(data.riTotalHours || 0).toFixed(1),
+          extended: 0,
+          labor: Number(data.riTotalCost || 0),
+          paint: 0,
+          note: "",
+        });
+      }
+    }
+    if (rows.length) groups.push({ group, rows });
+  }
+  return groups;
+}
+
+export function buildEstimateTotals(panelData, grandTotal) {
+  let pdr = 0;
+  let labor = 0;
+  for (const [, data] of activePanels(panelData)) {
+    if (data.rrEnabled || data.convEnabled) labor += Number(data.rrEnabled ? data.rrCost : data.convCost) || 0;
+    else {
+      const base = Number(data.basePrice) || 0;
+      const addon = Number(data.addonTotal) || 0;
+      pdr += (base || addon) ? base + addon : (Number(data.totalPrice) || 0);
+    }
+    if (data.riEnabled) labor += Number(data.riTotalCost) || 0;
+  }
+  pdr = roundMoney(pdr);
+  labor = roundMoney(labor);
+  const subtotal = roundMoney(pdr + labor);
+  const grand = roundMoney(Number(grandTotal) || subtotal);
+  return { parts: 0, bodyLabor: labor, paintLabor: 0, pdr, other: 0, subtotal, tax: 0, grand };
+}
+
 export function reportDocument({ vehicleInfo = {}, panelData = {}, carrierLabel = "State Farm", grandTotal = 0 } = {}, now = new Date()) {
   const info = vehicleInfo || {};
+  const when = now instanceof Date ? now : new Date();
   const panels = activePanels(panelData).map(([key, data]) => ({
     name: PANEL_LABELS[key] || key,
-    detail: hasExactCounts(data)
-      ? formatPanelDamage(data)
-      : (data.rrEnabled
-        ? "R&R"
-        : data.convEnabled
-          ? "Conventional"
-          : `${data.selectedRange || data.count} ${(DENT_SIZE_LABELS[data.size] || "").toLowerCase()} dents`.trim()),
+    detail: formatPanelDamage(data),
     amount: Number(data.totalPrice) || 0,
   }));
+  const lines = buildEstimateLines(panelData);
+  const totals = buildEstimateTotals(panelData, grandTotal);
   return {
-    date: now.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
-    carrier: carrierLabel || "State Farm",
-    owner: info.owner || "—",
-    vehicle: vehicleLine(info) || "—",
-    vin: info.vin || "—",
-    claim: info.claim || "—",
+    shop: SHOP,
+    title: "Preliminary Estimate",
+    date: when.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
+    dateTime: when.toLocaleString("en-US", { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }),
+    carrier: carrierLabel || "",
+    customer: info.customer || "",
+    writtenBy: info.writtenBy || "",
+    insured: info.insured || "",
+    policy: info.policy || "",
+    claim: info.claim || "",
+    typeOfLoss: info.typeOfLoss || "",
+    lossDate: info.lossDate || "",
+    pointOfImpact: info.pointOfImpact || "",
+    owner: info.owner || "",
+    inspectionLocation: info.inspectionLocation || "",
+    vehicle: vehicleLine(info) || "",
+    trim: info.trim || "",
+    vin: info.vin || "",
+    mileage: info.mileage || "",
+    license: info.license || "",
+    plateState: info.plateState || "",
+    color: info.color || "",
+    priorNotes: info.priorNotes || "",
     panels,
+    lines,
+    totals,
     sizeTotals: vehicleSizeTotals(panelData).text,
-    grandTotal: Number(grandTotal) || 0,
-    disclaimer: ESTIMATE_DISCLAIMER,
+    grandTotal: totals.grand,
   };
-}
-
-function byteLength(text) {
-  return new TextEncoder().encode(text).length;
-}
-
-function asciiPdf(value) {
-  return String(value ?? "")
-    .replace(/[—–]/g, "-")
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .replace(/…/g, "...")
-    .replace(/[^\x20-\x7E]/g, "");
-}
-
-function pdfEscape(value) {
-  return asciiPdf(value).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
-}
-
-function wrapPdfLines(text, width) {
-  const clean = asciiPdf(text);
-  if (!clean) return [""];
-  const lines = [];
-  let line = "";
-  for (const word of clean.split(/\s+/)) {
-    if (!word) continue;
-    if (word.length > width) {
-      if (line) lines.push(line);
-      for (let index = 0; index < word.length; index += width) lines.push(word.slice(index, index + width));
-      line = "";
-      continue;
-    }
-    const next = line ? `${line} ${word}` : word;
-    if (next.length > width) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = next;
-    }
-  }
-  if (line) lines.push(line);
-  return lines.length ? lines : [""];
-}
-
-function assemblePdf(pageStreams) {
-  const objects = new Map();
-  objects.set(1, "<< /Type /Catalog /Pages 2 0 R >>");
-  objects.set(3, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
-  objects.set(4, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
-  const kids = [];
-  let nextId = 5;
-  for (const stream of pageStreams) {
-    const contentId = nextId;
-    nextId += 1;
-    const pageId = nextId;
-    nextId += 1;
-    kids.push(`${pageId} 0 R`);
-    objects.set(contentId, { stream });
-    objects.set(pageId, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${contentId} 0 R /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> >>`);
-  }
-  objects.set(2, `<< /Type /Pages /Kids [${kids.join(" ")}] /Count ${kids.length} >>`);
-  const maxId = nextId - 1;
-  let body = "%PDF-1.4\n";
-  const offsets = [0];
-  for (let id = 1; id <= maxId; id += 1) {
-    offsets[id] = byteLength(body);
-    const obj = objects.get(id);
-    if (obj && Object.prototype.hasOwnProperty.call(obj, "stream")) {
-      const stream = obj.stream.endsWith("\n") ? obj.stream : `${obj.stream}\n`;
-      body += `${id} 0 obj\n<< /Length ${byteLength(stream)} >>\nstream\n${stream}endstream\nendobj\n`;
-    } else {
-      body += `${id} 0 obj\n${obj}\nendobj\n`;
-    }
-  }
-  const xrefStart = byteLength(body);
-  let xref = `xref\n0 ${maxId + 1}\n0000000000 65535 f \n`;
-  for (let id = 1; id <= maxId; id += 1) xref += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
-  body += `${xref}trailer\n<< /Size ${maxId + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
-  return new TextEncoder().encode(body);
 }
 
 export function buildEstimatePdf(input, now = new Date()) {
   const doc = reportDocument(input, now);
-  const blocks = [
-    { font: "F2", size: 18, text: "NTX HAIL" },
-    { font: "F1", size: 11, text: "HailSpec estimate" },
-    { font: "F1", size: 11, text: `${doc.carrier} | ${doc.date}` },
-    { font: "F1", size: 11, text: "" },
-    { font: "F1", size: 11, text: `Owner: ${doc.owner}` },
-    { font: "F1", size: 11, text: `Vehicle: ${doc.vehicle}` },
-    { font: "F1", size: 11, text: `VIN: ${doc.vin}` },
-    { font: "F1", size: 11, text: `Claim #: ${doc.claim}` },
-    { font: "F1", size: 11, text: "" },
-    ...(doc.sizeTotals ? [{ font: "F1", size: 11, text: doc.sizeTotals }, { font: "F1", size: 11, text: "" }] : []),
-    { font: "F2", size: 12, text: "Panels" },
-  ];
-  if (!doc.panels.length) blocks.push({ font: "F1", size: 11, text: "No panels estimated." });
-  for (const panel of doc.panels) {
-    blocks.push({
-      font: "F1",
-      size: 11,
-      text: `${panel.name}: ${panel.detail} - $${panel.amount.toLocaleString("en-US")}`,
-    });
-  }
-  blocks.push({ font: "F1", size: 11, text: "" });
-  blocks.push({ font: "F2", size: 13, text: `Grand total: $${doc.grandTotal.toLocaleString("en-US")}` });
-  blocks.push({ font: "F1", size: 10, text: "" });
-  for (const line of wrapPdfLines(doc.disclaimer, 90)) blocks.push({ font: "F1", size: 9, text: line });
-  blocks.push({ font: "F1", size: 9, text: "Generated by HailSpec for NTX Hail. ntxhail.com" });
-
-  const pages = [];
-  let commands = [];
-  let y = 740;
-  const finish = () => pages.push(commands.join("\n"));
-  const begin = () => { commands = []; y = 740; };
-  begin();
-  for (const block of blocks) {
-    const lead = block.size + 6;
-    for (const line of wrapPdfLines(block.text, block.size >= 16 ? 42 : 90)) {
-      if (y < 64) {
-        finish();
-        begin();
-        commands.push("BT /F1 9 Tf 54 750 Td (NTX HAIL estimate, continued) Tj ET");
-        y = 728;
-      }
-      commands.push(`BT /${block.font} ${block.size} Tf 54 ${y} Td (${pdfEscape(line)}) Tj ET`);
-      y -= lead;
-    }
-  }
-  finish();
-  return assemblePdf(pages.length ? pages : ["BT /F1 12 Tf 54 740 Td (NTX HAIL) Tj ET"]);
+  doc.photos = input?.photos || [];
+  return renderCccPdf(doc);
 }
+
 
 export function parseGhlForm(value) {
   const raw = String(value || "").trim();
@@ -1007,7 +1069,7 @@ export function fitSummaryForUrl(summary, limit = GHL_SUMMARY_LIMIT) {
       continue;
     }
     if (!seenPanel) header.push(line);
-    else if (line.startsWith("Grand total:") || line === ESTIMATE_DISCLAIMER) footer.push(line);
+    else if (line.startsWith("Grand total:")) footer.push(line);
   }
   const assemble = (keptCount) => {
     const omitted = panels.length - keptCount;
@@ -1075,8 +1137,8 @@ export function queueForSync(scope, lead, now = new Date()) {
   };
 }
 
-export function confirmScopeSent(scope, { frameLoaded = false } = {}, now = new Date()) {
-  if (!scope || scope.syncStatus !== "queued" || !frameLoaded) return { ok: false, scope };
+export function confirmScopeSent(scope, { frameLoaded = false, uploadsReady = true } = {}, now = new Date()) {
+  if (!scope || scope.syncStatus !== "queued" || !frameLoaded || !uploadsReady) return { ok: false, scope };
   return { ok: true, scope: { ...scope, syncStatus: "sent", sentAt: now.toISOString() } };
 }
 
@@ -1132,7 +1194,7 @@ export function buildPacketHtml(input = {}, paths = {}) {
 <p>Owner: ${escapeHtml(doc.owner)}<br>Vehicle: ${escapeHtml(doc.vehicle)}<br>VIN: ${escapeHtml(doc.vin)}<br>Claim #: ${escapeHtml(doc.claim)}</p>
 ${doc.sizeTotals ? `<p><strong>${escapeHtml(doc.sizeTotals)}</strong></p>` : ""}
 <table><tbody>${rows || `<tr><td colspan="3">No panels estimated.</td></tr>`}<tr><td colspan="2"><strong>Grand total</strong></td><td class="amt">$${doc.grandTotal.toLocaleString("en-US")}</td></tr></tbody></table>
-<p>${escapeHtml(doc.disclaimer)}</p>
+<p>${escapeHtml(doc.sizeTotals || "")}</p>
 ${photos}
 </body></html>`;
 }

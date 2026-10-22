@@ -53,7 +53,7 @@ function useObjectUrl(blob) {
   return url;
 }
 
-export function MediaScreen({ photos, panelData, onChange, onEditPanel }) {
+export function MediaScreen({ photos, panelData, onChange, onEditPanel, onBack }) {
   const [tab, setTab] = useState("panels");
   const [sheet, setSheet] = useState(null);
   const [activeId, setActiveId] = useState("");
@@ -133,12 +133,39 @@ export function MediaScreen({ photos, panelData, onChange, onEditPanel }) {
     }
   };
 
+  const closeSheet = () => {
+    if (history.state?.hailspec === "sheet") history.back();
+    else {
+      setSheet(null);
+      setQuickOpen(false);
+    }
+  };
+
+  useEffect(() => {
+    const onNav = (event) => {
+      if (event.detail === "close-sheet") {
+        setSheet(null);
+        setQuickOpen(false);
+      }
+    };
+    window.addEventListener("hailspec-nav", onNav);
+    return () => window.removeEventListener("hailspec-nav", onNav);
+  }, []);
+
   const openSheet = (target) => {
     setError("");
     setQuickOpen(false);
     const existing = target.tileId ? tilePhotos(target.tab, target.tileId) : [];
     setActiveId(existing.length ? existing[existing.length - 1].id : "");
+    if (history.state?.hailspec !== "sheet") history.pushState({ hailspec: "sheet" }, "");
     setSheet(target);
+  };
+
+  const openQuick = () => {
+    setError("");
+    setSheet(null);
+    if (history.state?.hailspec !== "sheet") history.pushState({ hailspec: "sheet" }, "");
+    setQuickOpen(true);
   };
 
   const sheetPhotos = sheet && sheet.tileId ? tilePhotos(sheet.tab, sheet.tileId) : [];
@@ -146,6 +173,7 @@ export function MediaScreen({ photos, panelData, onChange, onEditPanel }) {
 
   return (
     <div>
+      <button type="button" onClick={onBack} style={ui.back} aria-label="Back to estimate">Back</button>
       <div style={ui.toolbar}>
         <div style={ui.tabs} role="tablist" aria-label="Media">
           {MEDIA_TABS.map((item) => {
@@ -165,7 +193,7 @@ export function MediaScreen({ photos, panelData, onChange, onEditPanel }) {
             );
           })}
         </div>
-        <button type="button" aria-label="Add untagged photo" onClick={() => { setQuickOpen(true); setSheet(null); }} style={ui.quick}>
+        <button type="button" aria-label="Add untagged photo" onClick={openQuick} style={ui.quick}>
           <CameraIcon />
           <span style={ui.plus}>+</span>
         </button>
@@ -189,7 +217,7 @@ export function MediaScreen({ photos, panelData, onChange, onEditPanel }) {
       )}
       {error && !sheet && !quickOpen && <p style={ui.error}>{error}</p>}
       {quickOpen && (
-        <Sheet title="Quick photo" onClose={() => setQuickOpen(false)}>
+        <Sheet title="Quick photo" onClose={closeSheet}>
           <p style={ui.help}>Saved under Misc. No panel tag.</p>
           <div style={ui.actions}>
             <button type="button" style={ui.action} onClick={() => quickCameraRef.current?.click()}>Camera</button>
@@ -201,7 +229,7 @@ export function MediaScreen({ photos, panelData, onChange, onEditPanel }) {
         </Sheet>
       )}
       {sheet && (
-        <Sheet title={sheet.tileLabel} onClose={() => setSheet(null)}>
+        <Sheet title={sheet.tileLabel} onClose={closeSheet}>
           {sheet.panel && (
             <button type="button" style={ui.dentBtn} onClick={() => onEditPanel(sheet.panel)}>
               Dent count{panelDentTotal(panelData?.[sheet.panel]) > 0 ? ` · ${panelDentTotal(panelData[sheet.panel])}` : ""}
@@ -318,6 +346,7 @@ function Sheet({ title, onClose, children }) {
     <div style={ui.overlay} role="dialog" aria-modal="true" aria-label={title} onClick={onClose}>
       <div style={ui.sheet} onClick={(event) => event.stopPropagation()}>
         <div style={ui.sheetHead}>
+          <button type="button" onClick={onClose} style={ui.back} aria-label="Back to photos">Back</button>
           <div style={ui.sheetTitle}>{title}</div>
           <button type="button" onClick={onClose} style={ui.close} aria-label="Close">✕</button>
         </div>
@@ -328,6 +357,10 @@ function Sheet({ title, onClose, children }) {
 }
 
 const ui = {
+  back: {
+    minHeight: 44, minWidth: 72, border: "none", borderRadius: 10, background: "#e2e8f0",
+    color: "#0f172a", fontWeight: 800, fontSize: 16, padding: "8px 14px", cursor: "pointer", marginBottom: 8,
+  },
   toolbar: { display: "flex", alignItems: "stretch", gap: 8, marginBottom: 10 },
   tabs: { display: "flex", flex: 1, gap: 4, overflowX: "auto", minWidth: 0 },
   tab: {
