@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
   lookupPrice,
@@ -22,6 +25,14 @@ import {
   ESTIMATE_DISCLAIMER,
   carrierHasMatrix,
   GHL_SUMMARY_LIMIT,
+  formatPanelLine,
+  vehicleSizeTotals,
+  syncStatusLabel,
+  queueForSync,
+  confirmScopeSent,
+  buildZip,
+  groupPhotosForReport,
+  pruneScopes,
 } from "../src/hail-logic.js";
 import { GHL_FORM, GHL_SUMMARY_FIELD_ID } from "../src/config.js";
 
@@ -238,8 +249,98 @@ test("the downloaded estimate is a real PDF with the panel total", () => {
   assert.equal(text.includes("startxref"), true);
 });
 
+test("exact dent counts pick the matrix range and use carrier wording", () => {
+  const quote = quotePanel({
+    panel: "HOOD",
+    carrierId: "state_farm",
+    sizeCounts: { DIME: 12, NICKEL: 0, QUARTER: 6, HALF: 3 },
+  });
+  assert.equal(quote.count, 21);
+  assert.equal(quote.selectedRange, "16 - 30");
+  assert.equal(quote.size, "HALF");
+  assert.equal(quote.basePrice, 350);
+  const single = quotePanel({
+    panel: "HOOD",
+    carrierId: "state_farm",
+    sizeCounts: { DIME: 3, NICKEL: 0, QUARTER: 0, HALF: 0 },
+  });
+  assert.equal(single.selectedRange, "1 - 5");
+  assert.equal(single.basePrice, 80);
+  const line = formatPanelLine("HOOD", {
+    sizeCounts: { DIME: 12, NICKEL: 0, QUARTER: 6, HALF: 3 },
+    totalPrice: 350,
+  });
+  assert.equal(line, "Hood: 12 Dime, 6 Quarter, 3 Half Dollar — 21 total — $350");
+  const summary = buildEstimateSummary({
+    vehicleInfo: { year: "2020", make: "Toyota", model: "Camry" },
+    panelData: {
+      HOOD: { sizeCounts: { DIME: 12, NICKEL: 0, QUARTER: 6, HALF: 3 }, totalPrice: 350 },
+    },
+    carrierLabel: "State Farm",
+    grandTotal: 350,
+    photos: [{ id: "p1", tab: "panels", tileId: "hood", tabLabel: "Panels", tileLabel: "Hood", kind: "image", thumb: "data:image/jpeg;base64,a", note: "edge" }],
+  });
+  assert.match(summary, /Hood: 12 Dime, 6 Quarter, 3 Half Dollar — 21 total — \$350/);
+  assert.match(summary, /Vehicle dent totals: 12 Dime, 6 Quarter, 3 Half Dollar — 21 total/);
+  assert.match(summary, /Photos on phone: 1/);
+  assert.equal(vehicleSizeTotals({ HOOD: { sizeCounts: { DIME: 1 } } }).text.includes("1 Dime"), true);
+  const over = quotePanel({
+    panel: "HOOD",
+    carrierId: "state_farm",
+    sizeCounts: { DIME: 0, NICKEL: 0, QUARTER: 0, HALF: 0 },
+    addons: ["Oversized Dent"],
+    osDentCount: 2,
+  });
+  assert.equal(over.totalPrice, 100);
+});
+
+test("a queued scope is marked sent only after the form has loaded", () => {
+  assert.equal(syncStatusLabel("local"), "Saved on phone");
+  assert.equal(syncStatusLabel("queued"), "Waiting for signal");
+  assert.equal(syncStatusLabel("sent"), "Sent");
+  const queued = queueForSync({ id: "est_1", syncStatus: "local" }, { name: "Ada", phone: "2145550100", email: "", notes: "" }, new Date("2026-10-22T00:00:00Z"));
+  assert.equal(queued.syncStatus, "queued");
+  assert.equal(queued.lead.name, "Ada");
+  assert.equal(confirmScopeSent(queued, { frameLoaded: false }).ok, false);
+  const sent = confirmScopeSent(queued, { frameLoaded: true }, new Date("2026-10-22T01:00:00Z"));
+  assert.equal(sent.ok, true);
+  assert.equal(sent.scope.syncStatus, "sent");
+  assert.equal(confirmScopeSent(sent.scope, { frameLoaded: true }).ok, false);
+  const kept = pruneScopes([
+    { id: "current", syncStatus: "local", updatedAt: "1" },
+    { id: "wait", syncStatus: "queued", updatedAt: "2" },
+    { id: "old", syncStatus: "sent", updatedAt: "0" },
+  ], "current", 2);
+  assert.equal(kept.some((item) => item.id === "wait"), true);
+  assert.equal(kept.some((item) => item.id === "current"), true);
+  assert.equal(kept.some((item) => item.id === "old"), false);
+});
+
+test("the export zip keeps the estimate and grouped photos", () => {
+  const groups = groupPhotosForReport([
+    { id: "a", tabLabel: "Panels", tileLabel: "Hood", kind: "image", thumb: "data:image/jpeg;base64,qq", note: "edge" },
+    { id: "b", kind: "video", tileLabel: "Video 1", tabLabel: "Vehicle", name: "walk.mp4" },
+  ]);
+  assert.equal(groups[0].tab, "Panels");
+  assert.equal(groups[0].tile, "Hood");
+  assert.equal(groups[1].photos[0].kind, "video");
+  const zip = buildZip([
+    { name: "estimate.txt", data: "Hood: 6 Quarter, 12 Dime, 3 Half Dollar — 21 total" },
+    { name: "media/Panels/Hood/01.jpg", data: new Uint8Array([1, 2, 3, 4]) },
+  ], new Date("2026-10-22T12:00:00Z"));
+  const file = path.join(os.tmpdir(), `hailspec-${process.pid}.zip`);
+  fs.writeFileSync(file, zip);
+  const result = spawnSync("python3", ["-c", `import zipfile; z=zipfile.ZipFile(${JSON.stringify(file)}); print("\\n".join(z.namelist())); print(z.read("estimate.txt").decode())`]);
+  assert.equal(result.status, 0, result.stderr.toString());
+  const output = result.stdout.toString();
+  assert.match(output, /estimate\.txt/);
+  assert.match(output, /media\/Panels\/Hood\/01\.jpg/);
+  assert.match(output, /6 Quarter, 12 Dime, 3 Half Dollar/);
+  fs.unlinkSync(file);
+});
+
 test("the page and source do not show a phone number or a login gate", () => {
-  const files = ["index.html", "src/app.jsx", "src/config.js", "src/hail-logic.js"];
+  const files = ["index.html", "src/app.jsx", "src/config.js", "src/hail-logic.js", "src/media-screen.jsx", "src/media-catalog.js", "src/idb.js", "src/compress.js", "sw.js"];
   const phone = /(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}/;
   const banned = [/sign in/i, /create account/i, /supabase/i, /deductible waived/i, /cash rebate/i, /waive your deductible/i];
   for (const file of files) {

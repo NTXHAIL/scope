@@ -141,6 +141,9 @@ export const PANEL_LABELS = {
   LQ: "Left Quarter", LRAIL: "Left Rail",
   RFF: "Right Front Fender", RFD: "Right Front Door", RRD: "Right Rear Door",
   RQ: "Right Quarter", RRAIL: "Right Rail",
+  LT_CAB: "LT Cab Corner", RT_CAB: "RT Cab Corner",
+  LT_BED: "LT Bed Side", RT_BED: "RT Bed Side",
+  TAILGATE: "Tailgate", PILLARS: "Pillars", OTHER: "Other Panel",
 };
 
 export const RI_OPERATIONS = {
@@ -308,14 +311,137 @@ export function roundMoney(n) {
   return Math.round(Number(n) * 100) / 100;
 }
 
+export function normalizeSizeCounts(value) {
+  const counts = { DIME: 0, NICKEL: 0, QUARTER: 0, HALF: 0 };
+  const source = value && typeof value === "object" ? value : {};
+  for (const size of DENT_SIZES) {
+    const n = Math.round(Number(source[size]) || 0);
+    counts[size] = Math.max(0, Math.min(999, Number.isFinite(n) ? n : 0));
+  }
+  return counts;
+}
+
+export function totalSizeCount(counts) {
+  return DENT_SIZES.reduce((sum, size) => sum + (Number(counts?.[size]) || 0), 0);
+}
+
+export function largestPricedSize(counts) {
+  for (const size of ["HALF", "QUARTER", "NICKEL", "DIME"]) {
+    if ((Number(counts?.[size]) || 0) > 0) return size;
+  }
+  return null;
+}
+
+export function hasExactCounts(data) {
+  if (!data) return false;
+  if (data.sizeCounts && DENT_SIZES.some((size) => Number(data.sizeCounts[size]) > 0)) return true;
+  return Number(data.osDentCount) > 0 || Number(data.doubleOsCount) > 0;
+}
+
+export function formatSizeList(counts, os = 0, doubleOs = 0) {
+  const parts = [];
+  let total = 0;
+  for (const size of DENT_SIZES) {
+    const n = Math.max(0, Math.round(Number(counts?.[size]) || 0));
+    if (n > 0) {
+      parts.push(`${n} ${DENT_SIZE_LABELS[size]}`);
+      total += n;
+    }
+  }
+  const over = Math.max(0, Math.round(Number(os) || 0));
+  const dbl = Math.max(0, Math.round(Number(doubleOs) || 0));
+  if (over > 0) {
+    parts.push(`${over} Oversize`);
+    total += over;
+  }
+  if (dbl > 0) {
+    parts.push(`${dbl} Double OS`);
+    total += dbl;
+  }
+  return {
+    parts,
+    total,
+    text: parts.length ? `${parts.join(", ")} — ${total} total` : "",
+  };
+}
+
+export function formatPanelDamage(data) {
+  const list = formatSizeList(data?.sizeCounts, data?.osDentCount, data?.doubleOsCount);
+  if (list.text) {
+    if (data?.rrEnabled) return `R&R — ${list.text}`;
+    if (data?.convEnabled) return `Conventional — ${list.text}`;
+    return list.text;
+  }
+  if (data?.rrEnabled) return "R&R";
+  if (data?.convEnabled) return "Conventional";
+  const size = (DENT_SIZE_LABELS[data?.size] || "").toLowerCase();
+  return `${data?.selectedRange || data?.count || 0} ${size} dents`.trim();
+}
+
+export function formatPanelLine(key, data) {
+  const name = PANEL_LABELS[key] || key;
+  const price = `$${Number(data?.totalPrice || 0).toLocaleString("en-US")}`;
+  if (!hasExactCounts(data)) {
+    const how = data?.rrEnabled
+      ? "R&R"
+      : data?.convEnabled
+        ? "Conventional"
+        : `${data?.selectedRange || data?.count || 0} ${(DENT_SIZE_LABELS[data?.size] || "").toLowerCase()} dents`;
+    return `${name}: ${how} — ${price}`;
+  }
+  return `${name}: ${formatPanelDamage(data)} — ${price}`;
+}
+
+export function vehicleSizeTotals(panelData) {
+  const counts = { DIME: 0, NICKEL: 0, QUARTER: 0, HALF: 0 };
+  let os = 0;
+  let doubleOs = 0;
+  let any = false;
+  for (const data of Object.values(panelData || {})) {
+    if (!data || typeof data !== "object" || !data.sizeCounts) continue;
+    any = true;
+    for (const size of DENT_SIZES) counts[size] += Number(data.sizeCounts[size]) || 0;
+    os += Number(data.osDentCount) || 0;
+    doubleOs += Number(data.doubleOsCount) || 0;
+  }
+  const list = formatSizeList(counts, os, doubleOs);
+  return {
+    counts,
+    os,
+    doubleOs,
+    any,
+    text: any && list.text ? `Vehicle dent totals: ${list.text}` : "",
+  };
+}
+
+export function panelDentTotal(data) {
+  if (!data) return 0;
+  if (data.sizeCounts && typeof data.sizeCounts === "object") return totalSizeCount(data.sizeCounts);
+  return Number(data.count) || 0;
+}
+
 export function quotePanel(input) {
   const panel = input.panel;
   const carrierId = input.carrierId || "state_farm";
   const rows = getMatrix(carrierId)[panel] || [];
-  const selectedRow = input.selectedRange ? rows.find((r) => r.range === input.selectedRange) : null;
-  const size = input.size || "DIME";
+  const sizeCounts = input.sizeCounts ? normalizeSizeCounts(input.sizeCounts) : null;
+  const usingCounts = !!(sizeCounts && totalSizeCount(sizeCounts) > 0);
+  let size;
+  let selectedRow;
+  let count;
+  let selectedRange;
+  if (usingCounts) {
+    count = totalSizeCount(sizeCounts);
+    size = largestPricedSize(sizeCounts) || "DIME";
+    selectedRow = rows.find((row) => count >= row.min && count <= row.max) || null;
+    selectedRange = selectedRow ? selectedRow.range : null;
+  } else {
+    selectedRow = input.selectedRange ? rows.find((row) => row.range === input.selectedRange) : null;
+    size = input.size || "DIME";
+    count = selectedRow ? selectedRow.max : 0;
+    selectedRange = input.selectedRange || null;
+  }
   const basePrice = selectedRow ? (selectedRow[size] || 0) : 0;
-  const count = selectedRow ? selectedRow.max : 0;
   const addons = input.addons || [];
   const osDentCount = input.osDentCount || 0;
   const doubleOsCount = input.doubleOsCount || 0;
@@ -348,11 +474,18 @@ export function quotePanel(input) {
   return {
     rows, selectedRow, basePrice, count, addonBreakdown, addonTotal, nonPdr,
     rrCost, convCost, riTotalHours, riTotalCost, pdrTotal, totalPrice, laborRate,
+    size, selectedRange, sizeCounts: sizeCounts || normalizeSizeCounts(null),
   };
 }
 
 export function activePanels(panelData) {
-  return Object.entries(panelData || {}).filter(([, data]) => data && (data.count > 0 || data.rrEnabled || data.convEnabled));
+  return Object.entries(panelData || {}).filter(([, data]) => data && (
+    panelDentTotal(data) > 0
+    || data.rrEnabled
+    || data.convEnabled
+    || Number(data.osDentCount) > 0
+    || Number(data.doubleOsCount) > 0
+  ));
 }
 
 export function grandTotalOf(panelData) {
@@ -360,10 +493,7 @@ export function grandTotalOf(panelData) {
 }
 
 export function maxDentCount(panelData) {
-  return activePanels(panelData).reduce((sum, [, data]) => {
-    if (data.rrEnabled || data.convEnabled) return sum;
-    return sum + (Number(data.count) || 0);
-  }, 0);
+  return activePanels(panelData).reduce((sum, [, data]) => sum + panelDentTotal(data), 0);
 }
 
 export function vehicleLine(vehicleInfo) {
@@ -372,7 +502,8 @@ export function vehicleLine(vehicleInfo) {
 
 export const DRAFT_STORAGE_KEY = "hailspec.draft.v1";
 export const SAVED_STORAGE_KEY = "hailspec.saved.v1";
-export const SAVED_ESTIMATE_LIMIT = 20;
+export const SAVED_ESTIMATE_LIMIT = 100;
+export const MAX_PHOTOS = 80;
 
 export function blankVehicle() {
   return { owner: "", year: "", make: "", model: "", vin: "", claim: "" };
@@ -381,7 +512,8 @@ export function blankVehicle() {
 export function estimateHasWork(estimate) {
   const vehicle = estimate?.vehicleInfo || {};
   const named = ["owner", "vin", "make", "year", "model", "claim"].some((key) => String(vehicle[key] || "").trim());
-  return named || activePanels(estimate?.panelData).length > 0;
+  const photos = Array.isArray(estimate?.photos) && estimate.photos.length > 0;
+  return named || activePanels(estimate?.panelData).length > 0 || photos;
 }
 
 export function createEstimateId() {
@@ -396,21 +528,69 @@ export function normalizeVehicle(value) {
   return next;
 }
 
+function normalizeLead(lead) {
+  if (!lead || typeof lead !== "object") return null;
+  return {
+    name: String(lead.name || "").slice(0, 120),
+    phone: String(lead.phone || "").slice(0, 40),
+    email: String(lead.email || "").slice(0, 120),
+    notes: String(lead.notes || "").slice(0, 1000),
+  };
+}
+
+function normalizePhoto(photo, index) {
+  if (!photo || typeof photo !== "object") return null;
+  const url = typeof photo.url === "string" && (photo.url.startsWith("data:image/") || photo.url.startsWith("data:video/")) ? photo.url : "";
+  const thumb = typeof photo.thumb === "string" && photo.thumb.startsWith("data:image/") ? photo.thumb : "";
+  const hasBlob = typeof Blob !== "undefined" && photo.blob instanceof Blob;
+  if (!url && !thumb && !hasBlob) return null;
+  const tabs = ["panels", "vehicle", "interior", "wheel", "misc"];
+  return {
+    id: String(photo.id || `photo_${index}`),
+    tab: tabs.includes(photo.tab) ? photo.tab : "misc",
+    tileId: String(photo.tileId || "untagged").slice(0, 40),
+    tileLabel: String(photo.tileLabel || "Photo").slice(0, 80),
+    tabLabel: String(photo.tabLabel || "Misc").slice(0, 40),
+    note: String(photo.note || "").slice(0, 500),
+    kind: photo.kind === "video" ? "video" : "image",
+    name: String(photo.name || "").slice(0, 120),
+    createdAt: String(photo.createdAt || photo.date || ""),
+    url,
+    thumb,
+    ...(hasBlob ? { blob: photo.blob } : {}),
+  };
+}
+
+function normalizePanelData(panelData) {
+  const out = {};
+  if (!panelData || typeof panelData !== "object" || Array.isArray(panelData)) return out;
+  for (const [key, data] of Object.entries(panelData)) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+    const next = { ...data };
+    if (data.sizeCounts && typeof data.sizeCounts === "object") next.sizeCounts = normalizeSizeCounts(data.sizeCounts);
+    out[key] = next;
+  }
+  return out;
+}
+
 export function normalizeEstimate(value) {
   const source = value && typeof value === "object" ? value : {};
-  const panelData = source.panelData && typeof source.panelData === "object" && !Array.isArray(source.panelData)
-    ? source.panelData
-    : {};
   const photos = Array.isArray(source.photos)
-    ? source.photos.filter((photo) => photo && typeof photo.url === "string" && photo.url.startsWith("data:image/")).slice(0, 12)
+    ? source.photos.map((photo, index) => normalizePhoto(photo, index)).filter(Boolean).slice(0, MAX_PHOTOS)
     : [];
+  const syncStatus = ["local", "queued", "sent"].includes(source.syncStatus) ? source.syncStatus : "local";
   return {
     id: String(source.id || "") || createEstimateId(),
     updatedAt: String(source.updatedAt || "") || new Date().toISOString(),
+    createdAt: String(source.createdAt || source.updatedAt || "") || new Date().toISOString(),
     vehicleInfo: normalizeVehicle(source.vehicleInfo),
-    panelData,
+    panelData: normalizePanelData(source.panelData),
     carrierId: CARRIERS.some((carrier) => carrier.id === source.carrierId) ? source.carrierId : "state_farm",
     photos,
+    syncStatus,
+    lead: normalizeLead(source.lead),
+    queuedAt: String(source.queuedAt || ""),
+    sentAt: String(source.sentAt || ""),
   };
 }
 
@@ -474,16 +654,8 @@ export function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-export function buildEstimateSummary({ vehicleInfo = {}, panelData = {}, carrierLabel = "State Farm", grandTotal = 0 }) {
-  const lines = activePanels(panelData).map(([key, data]) => {
-    const how = data.rrEnabled
-      ? "R&R"
-      : data.convEnabled
-        ? "Conventional"
-        : `${data.selectedRange || data.count} ${(DENT_SIZE_LABELS[data.size] || "").toLowerCase()} dents`;
-    const price = Number(data.totalPrice || 0).toLocaleString("en-US");
-    return `${PANEL_LABELS[key]}: ${how} — $${price}`;
-  });
+export function buildEstimateSummary({ vehicleInfo = {}, panelData = {}, carrierLabel = "State Farm", grandTotal = 0, photos = [] } = {}) {
+  const lines = activePanels(panelData).map(([key, data]) => formatPanelLine(key, data));
   const vehicle = vehicleLine(vehicleInfo) || "Vehicle not set";
   const parts = [
     "HailSpec web estimate",
@@ -493,6 +665,10 @@ export function buildEstimateSummary({ vehicleInfo = {}, panelData = {}, carrier
   if (vehicleInfo.vin) parts.push(`VIN: ${vehicleInfo.vin}`);
   if (vehicleInfo.claim) parts.push(`Claim #: ${vehicleInfo.claim}`);
   if (vehicleInfo.owner) parts.push(`Owner on estimate: ${vehicleInfo.owner}`);
+  const totals = vehicleSizeTotals(panelData);
+  if (totals.text) parts.push(totals.text);
+  const photoCount = Array.isArray(photos) ? photos.length : 0;
+  if (photoCount > 0) parts.push(`Photos on phone: ${photoCount}. Share/Export sends the pictures. This form cannot attach them.`);
   parts.push("");
   parts.push(...(lines.length ? lines : ["No panels estimated."]));
   parts.push("");
@@ -532,8 +708,10 @@ function panelRowsHtml(panelData) {
     } else {
       lineNum += 1;
       totalPrice += (data.basePrice || 0);
-      const sizeLabel = (DENT_SIZE_LABELS[data.size] || "").toLowerCase();
-      html += `<tr><td class="ln">${lineNum}</td><td>PDR — ${escapeHtml(data.selectedRange || data.count)} ${escapeHtml(sizeLabel)} dents</td><td>1</td><td class="amt">$${Number(data.basePrice || 0).toLocaleString("en-US")}</td><td></td></tr>`;
+      const damage = hasExactCounts(data)
+        ? formatPanelDamage(data)
+        : `${data.selectedRange || data.count} ${(DENT_SIZE_LABELS[data.size] || "").toLowerCase()} dents`.trim();
+      html += `<tr><td class="ln">${lineNum}</td><td>PDR — ${escapeHtml(damage)}</td><td>1</td><td class="amt">$${Number(data.basePrice || 0).toLocaleString("en-US")}</td><td></td></tr>`;
       (data.addons || []).forEach((name) => {
         const addon = ADDONS.find((item) => item.name === name);
         if (!addon) return;
@@ -569,12 +747,62 @@ function panelRowsHtml(panelData) {
   return { rows, totalPrice, totalLabor };
 }
 
+function photoImageSrc(photo) {
+  if (typeof photo?.url === "string" && photo.url.startsWith("data:image/")) return photo.url;
+  if (typeof photo?.thumb === "string" && photo.thumb.startsWith("data:image/")) return photo.thumb;
+  return "";
+}
+
+export function groupPhotosForReport(photos) {
+  const groups = [];
+  const index = new Map();
+  for (const photo of photos || []) {
+    if (!photo || typeof photo !== "object") continue;
+    const src = photoImageSrc(photo);
+    const video = photo.kind === "video";
+    const hasBlob = typeof Blob !== "undefined" && photo.blob instanceof Blob;
+    if (!src && !video && !hasBlob) continue;
+    const tab = String(photo.tabLabel || "Photos");
+    const tile = String(photo.tileLabel || "Photo");
+    const key = `${tab}\n${tile}`;
+    if (!index.has(key)) {
+      const group = { tab, tile, photos: [] };
+      index.set(key, group);
+      groups.push(group);
+    }
+    index.get(key).photos.push(photo);
+  }
+  return groups;
+}
+
+function renderPhotoHtml(photos) {
+  const groups = groupPhotosForReport(photos);
+  if (!groups.length) return "";
+  let html = `<h3 style="margin:16px 0 8px;font-size:14px">Photos</h3>`;
+  let lastTab = "";
+  for (const group of groups) {
+    if (group.tab !== lastTab) {
+      html += `<h4 style="margin:12px 0 6px;font-size:13px">${escapeHtml(group.tab)}</h4>`;
+      lastTab = group.tab;
+    }
+    html += `<div style="font-weight:700;margin:6px 0">${escapeHtml(group.tile)} (${group.photos.length})</div><div class="photos">`;
+    for (const photo of group.photos) {
+      const src = photoImageSrc(photo);
+      if (photo.kind === "video" || !src) html += `<p>Video: ${escapeHtml(photo.name || photo.tileLabel || "Video")}</p>`;
+      else html += `<figure style="margin:0"><img src="${escapeHtml(src)}" alt=""/>${photo.note ? `<figcaption>${escapeHtml(photo.note)}</figcaption>` : ""}</figure>`;
+    }
+    html += `</div>`;
+  }
+  return html;
+}
+
 export function generateReportHTML(vehicleInfo, panelData, photos, grandTotal, carrierLabel) {
   const label = carrierLabel || "State Farm";
   const date = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
   const { rows, totalPrice, totalLabor } = panelRowsHtml(panelData);
   const info = vehicleInfo || {};
-  const safePhotos = (photos || []).filter((photo) => typeof photo?.url === "string" && photo.url.startsWith("data:image/"));
+  const photoHtml = renderPhotoHtml(photos);
+  const sizeTotals = vehicleSizeTotals(panelData).text;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>NTX Hail — Estimate</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Segoe UI',system-ui,sans-serif;color:#1e293b;padding:24px;max-width:800px;margin:0 auto;font-size:13px}.header{border-bottom:3px solid #0a1628;padding-bottom:20px;margin-bottom:24px}.brand-name{font-size:18px;font-weight:900;letter-spacing:1px;color:#0a1628}.brand-tag{font-size:11px;color:#2563eb;font-weight:700;letter-spacing:2px;text-transform:uppercase}.header p{color:#64748b;margin-top:4px;font-size:13px}.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;margin-bottom:24px;font-size:13px}.info-grid dt{color:#64748b;font-weight:500}.info-grid dd{font-weight:600;overflow-wrap:anywhere}table{width:100%;border-collapse:collapse;margin-bottom:20px}th{background:#0a1628;color:#f8fafc;padding:8px 10px;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.5px}td{padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:13px}.ln{width:36px;color:#94a3b8;font-weight:600;text-align:center;font-size:12px}.amt{text-align:right;font-weight:600;white-space:nowrap}.section-row td{background:#eff6ff;font-weight:800;font-size:13px;color:#1e3a5f;padding:8px 10px;border-bottom:2px solid #bfdbfe}.section-row-rr td{background:#fef2f2;font-weight:800;font-size:13px;color:#7f1d1d;padding:8px 10px;border-bottom:2px solid #fecaca}.addon-row td{color:#475569}.labor-row td{color:#1e293b}.rr-labor-row td{color:#dc2626}.subtotal-row td{border-top:2px solid #cbd5e1;font-weight:700;font-size:13px;padding:8px 10px}.total-row td{border-top:3px solid #0a1628;font-weight:800;font-size:15px;padding:10px}.total-row .amt{font-size:16px;color:#2563eb}.photos{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}.photos img{width:150px;max-width:100%;height:110px;object-fit:cover;border-radius:6px;border:1px solid #e2e8f0}.disclaimer{margin-top:16px;font-size:12px;color:#334155;line-height:1.5}.footer{margin-top:24px;padding-top:16px;border-top:1px solid #e2e8f0;font-size:11px;color:#94a3b8;text-align:center}@media print{body{padding:16px}}</style>
 </head><body>
@@ -584,25 +812,25 @@ export function generateReportHTML(vehicleInfo, panelData, photos, grandTotal, c
 <tbody>${rows}<tr class="subtotal-row"><td></td><td colspan="2">Subtotals</td><td class="amt">$${totalPrice.toLocaleString("en-US")}</td><td class="amt">$${totalLabor.toFixed(2)}</td></tr>
 <tr class="total-row"><td></td><td colspan="2">GRAND TOTAL</td><td colspan="2" class="amt">$${Number(grandTotal || 0).toLocaleString("en-US")}</td></tr></tbody></table>
 <p class="disclaimer">${escapeHtml(ESTIMATE_DISCLAIMER)}</p>
-${safePhotos.length > 0 ? `<h3 style="margin-bottom:12px;font-size:14px">Documentation Photos</h3><div class="photos">${safePhotos.map((photo) => `<img src="${escapeHtml(photo.url)}" alt=""/>`).join("")}</div>` : ""}
+${sizeTotals ? `<p class="disclaimer">${escapeHtml(sizeTotals)}</p>` : ""}
+${photoHtml}
 <div class="footer">Generated by HailSpec — NTX Hail — ${escapeHtml(date)}</div>
 </body></html>`;
 }
 
 export function reportDocument({ vehicleInfo = {}, panelData = {}, carrierLabel = "State Farm", grandTotal = 0 } = {}, now = new Date()) {
   const info = vehicleInfo || {};
-  const panels = activePanels(panelData).map(([key, data]) => {
-    const detail = data.rrEnabled
-      ? "R&R"
-      : data.convEnabled
-        ? "Conventional"
-        : `${data.selectedRange || data.count} ${(DENT_SIZE_LABELS[data.size] || "").toLowerCase()} dents`.trim();
-    return {
-      name: PANEL_LABELS[key] || key,
-      detail,
-      amount: Number(data.totalPrice) || 0,
-    };
-  });
+  const panels = activePanels(panelData).map(([key, data]) => ({
+    name: PANEL_LABELS[key] || key,
+    detail: hasExactCounts(data)
+      ? formatPanelDamage(data)
+      : (data.rrEnabled
+        ? "R&R"
+        : data.convEnabled
+          ? "Conventional"
+          : `${data.selectedRange || data.count} ${(DENT_SIZE_LABELS[data.size] || "").toLowerCase()} dents`.trim()),
+    amount: Number(data.totalPrice) || 0,
+  }));
   return {
     date: now.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
     carrier: carrierLabel || "State Farm",
@@ -611,6 +839,7 @@ export function reportDocument({ vehicleInfo = {}, panelData = {}, carrierLabel 
     vin: info.vin || "—",
     claim: info.claim || "—",
     panels,
+    sizeTotals: vehicleSizeTotals(panelData).text,
     grandTotal: Number(grandTotal) || 0,
     disclaimer: ESTIMATE_DISCLAIMER,
   };
@@ -707,6 +936,7 @@ export function buildEstimatePdf(input, now = new Date()) {
     { font: "F1", size: 11, text: `VIN: ${doc.vin}` },
     { font: "F1", size: 11, text: `Claim #: ${doc.claim}` },
     { font: "F1", size: 11, text: "" },
+    ...(doc.sizeTotals ? [{ font: "F1", size: 11, text: doc.sizeTotals }, { font: "F1", size: 11, text: "" }] : []),
     { font: "F2", size: 12, text: "Panels" },
   ];
   if (!doc.panels.length) blocks.push({ font: "F1", size: 11, text: "No panels estimated." });
@@ -826,4 +1056,154 @@ export function validateLead(lead) {
   const email = String(lead?.email || "").trim();
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.email = "Enter an email address.";
   return errors;
+}
+
+export function syncStatusLabel(status) {
+  if (status === "sent") return "Sent";
+  if (status === "queued") return "Waiting for signal";
+  return "Saved on phone";
+}
+
+export function queueForSync(scope, lead, now = new Date()) {
+  const normalized = normalizeLead(lead) || { name: "", phone: "", email: "", notes: "" };
+  return {
+    ...scope,
+    syncStatus: "queued",
+    lead: normalized,
+    queuedAt: now.toISOString(),
+    sentAt: "",
+  };
+}
+
+export function confirmScopeSent(scope, { frameLoaded = false } = {}, now = new Date()) {
+  if (!scope || scope.syncStatus !== "queued" || !frameLoaded) return { ok: false, scope };
+  return { ok: true, scope: { ...scope, syncStatus: "sent", sentAt: now.toISOString() } };
+}
+
+export function pruneScopes(list, currentId, limit = SAVED_ESTIMATE_LIMIT) {
+  const pinned = [];
+  const sent = [];
+  const local = [];
+  for (const scope of Array.isArray(list) ? list : []) {
+    if (!scope) continue;
+    if (scope.id === currentId || scope.syncStatus === "queued") pinned.push(scope);
+    else if (scope.syncStatus === "sent") sent.push(scope);
+    else local.push(scope);
+  }
+  const byNewest = (a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+  sent.sort(byNewest);
+  local.sort(byNewest);
+  const must = [...pinned, ...local];
+  const room = Math.max(0, limit - must.length);
+  return [...must, ...sent.slice(0, room)];
+}
+
+export function mediaExportPath(photo, index) {
+  const safe = (value) => String(value || "file").replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "file";
+  const ext = photo?.kind === "video" ? "mp4" : "jpg";
+  return `media/${safe(photo?.tabLabel)}/${safe(photo?.tileLabel)}/${String(index + 1).padStart(2, "0")}.${ext}`;
+}
+
+export function buildPacketHtml(input = {}, paths = {}) {
+  const doc = reportDocument(input);
+  const groups = groupPhotosForReport(input.photos || []);
+  const rows = doc.panels.map((panel) => `<tr><td>${escapeHtml(panel.name)}</td><td>${escapeHtml(panel.detail)}</td><td class="amt">$${panel.amount.toLocaleString("en-US")}</td></tr>`).join("");
+  let photos = "";
+  let lastTab = "";
+  for (const group of groups) {
+    if (group.tab !== lastTab) {
+      photos += `<h2>${escapeHtml(group.tab)}</h2>`;
+      lastTab = group.tab;
+    }
+    photos += `<h3>${escapeHtml(group.tile)} (${group.photos.length})</h3><div class="photos">`;
+    group.photos.forEach((photo) => {
+      const path = paths[photo.id];
+      const src = photoImageSrc(photo);
+      if (path && photo.kind !== "video") photos += `<figure><img src="${escapeHtml(path)}" alt=""/>${photo.note ? `<figcaption>${escapeHtml(photo.note)}</figcaption>` : ""}</figure>`;
+      else if (path) photos += `<p>Video file: ${escapeHtml(path)}${photo.note ? ` — ${escapeHtml(photo.note)}` : ""}</p>`;
+      else if (src) photos += `<figure><img src="${escapeHtml(src)}" alt=""/>${photo.note ? `<figcaption>${escapeHtml(photo.note)}</figcaption>` : ""}</figure>`;
+      else photos += `<p>Video: ${escapeHtml(photo.name || group.tile)}</p>`;
+    });
+    photos += `</div>`;
+  }
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>HailSpec scope</title>
+<style>body{font-family:system-ui,sans-serif;color:#1e293b;padding:24px;max-width:800px;margin:0 auto}h1{font-size:22px;margin:0}h2{font-size:16px;margin:18px 0 6px}h3{font-size:14px;margin:8px 0}table{width:100%;border-collapse:collapse}td{border-bottom:1px solid #e2e8f0;padding:8px;vertical-align:top}.amt{text-align:right;font-weight:700}.photos{display:flex;flex-wrap:wrap;gap:8px}.photos img{width:160px;height:120px;object-fit:cover}figcaption{font-size:12px;max-width:160px}</style></head><body>
+<h1>NTX HAIL</h1><p>HailSpec scope · ${escapeHtml(doc.carrier)} · ${escapeHtml(doc.date)}</p>
+<p>Owner: ${escapeHtml(doc.owner)}<br>Vehicle: ${escapeHtml(doc.vehicle)}<br>VIN: ${escapeHtml(doc.vin)}<br>Claim #: ${escapeHtml(doc.claim)}</p>
+${doc.sizeTotals ? `<p><strong>${escapeHtml(doc.sizeTotals)}</strong></p>` : ""}
+<table><tbody>${rows || `<tr><td colspan="3">No panels estimated.</td></tr>`}<tr><td colspan="2"><strong>Grand total</strong></td><td class="amt">$${doc.grandTotal.toLocaleString("en-US")}</td></tr></tbody></table>
+<p>${escapeHtml(doc.disclaimer)}</p>
+${photos}
+</body></html>`;
+}
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function concatBytes(parts) {
+  const size = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+function u16(n) {
+  const bytes = new Uint8Array(2);
+  new DataView(bytes.buffer).setUint16(0, n & 0xffff, true);
+  return bytes;
+}
+
+function u32(n) {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, n >>> 0, true);
+  return bytes;
+}
+
+export function buildZip(files, now = new Date()) {
+  const date = now instanceof Date ? now : new Date();
+  const time = ((date.getHours() & 31) << 11) | ((date.getMinutes() & 63) << 5) | (Math.floor(date.getSeconds() / 2) & 31);
+  const day = (((date.getFullYear() - 1980) & 127) << 9) | (((date.getMonth() + 1) & 15) << 5) | (date.getDate() & 31);
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  const list = Array.isArray(files) ? files : [];
+  for (const file of list) {
+    const nameBytes = new TextEncoder().encode(String(file?.name || "file").replace(/\\/g, "/"));
+    const data = file?.data instanceof Uint8Array ? file.data : new TextEncoder().encode(String(file?.data ?? ""));
+    const crc = crc32(data);
+    const local = concatBytes([
+      u32(0x04034b50), u16(20), u16(0x0800), u16(0), u16(time), u16(day),
+      u32(crc), u32(data.length), u32(data.length), u16(nameBytes.length), u16(0), nameBytes, data,
+    ]);
+    locals.push(local);
+    centrals.push(concatBytes([
+      u32(0x02014b50), u16(20), u16(20), u16(0x0800), u16(0), u16(time), u16(day),
+      u32(crc), u32(data.length), u32(data.length), u16(nameBytes.length), u16(0), u16(0), u16(0), u16(0),
+      u32(0), u32(offset), nameBytes,
+    ]));
+    offset += local.length;
+  }
+  const centralBytes = concatBytes(centrals);
+  const eocd = concatBytes([
+    u32(0x06054b50), u16(0), u16(0), u16(list.length), u16(list.length),
+    u32(centralBytes.length), u32(offset), u16(0),
+  ]);
+  return concatBytes([...locals, centralBytes, eocd]);
 }
