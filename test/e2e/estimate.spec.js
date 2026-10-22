@@ -22,7 +22,8 @@ async function addHood(page) {
   await resetPhone(page);
   await expect(page.getByRole("button", { name: "New estimate" })).toBeVisible();
   await page.getByRole("button", { name: "Edit Hood" }).click();
-  await page.getByRole("button", { name: "Increase Dime" }).click();
+  await page.getByRole("option", { name: "Dime" }).click();
+  await page.getByRole("button", { name: "Increase Dent count" }).click();
   await page.getByRole("button", { name: /^Save —/ }).click();
   await expect(page.getByRole("button", { name: /Hood/ }).first()).toBeVisible();
 }
@@ -49,7 +50,7 @@ test("a hood estimate autosaves, prints, downloads a PDF, and can start fresh", 
   await page.reload();
   await expect(page.getByText("$80").first()).toBeVisible();
   await expect(page.getByText("Saved on phone").first()).toBeVisible();
-  await expect(page.getByText(/1 Dime — 1 total/).first()).toBeVisible();
+  await expect(page.getByText(/PDR 1 dime/).first()).toBeVisible();
 
   await page.getByRole("button", { name: /^Review\s*\d*$/ }).click();
   await expect(page.getByRole("button", { name: "Print" })).toBeVisible();
@@ -58,9 +59,11 @@ test("a hood estimate autosaves, prints, downloads a PDF, and can start fresh", 
   await expect.poll(() => page.evaluate(() => window.__printed)).toBe(1);
   await page.emulateMedia({ media: "print" });
   await expect(page.locator(".print-sheet")).toBeVisible();
-  await expect(page.locator(".print-sheet")).toContainText("Hood");
+  await expect(page.locator(".print-sheet")).toContainText("Preliminary Estimate");
+  await expect(page.locator(".print-sheet")).toContainText("WWW.NTXHAIL.COM");
+  await expect(page.locator(".print-sheet")).toContainText("PDR 1 dime");
   await expect(page.locator(".print-sheet")).toContainText("$80");
-  await expect(page.locator(".print-sheet")).toContainText("repair estimate only");
+  await expect(page.locator(".print-sheet")).not.toContainText("repair estimate only");
   await expect(page.locator(".app-screen")).toBeHidden();
   await page.emulateMedia({ media: "screen" });
 
@@ -72,7 +75,10 @@ test("a hood estimate autosaves, prints, downloads a PDF, and can start fresh", 
   const filePath = await download.path();
   const bytes = fs.readFileSync(filePath);
   expect(bytes.subarray(0, 5).toString()).toBe("%PDF-");
-  expect(bytes.includes(Buffer.from("Grand total: $80"))).toBe(true);
+  expect(bytes.includes(Buffer.from("Grand Total"))).toBe(true);
+  expect(bytes.includes(Buffer.from("80.00"))).toBe(true);
+  expect(bytes.includes(Buffer.from("WWW.NTXHAIL.COM"))).toBe(true);
+  expect(bytes.includes(Buffer.from("repair estimate only"))).toBe(false);
 
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "New estimate" }).first().click();
@@ -88,6 +94,9 @@ test("photos stay on the phone and a scope waits for signal", async ({ page, con
     contentType: "text/html",
     body: "<!doctype html><title>Form</title><p>Consent</p>",
   }));
+  await page.route("**/storage/v1/object/**", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  });
   await addHood(page);
   await page.getByRole("button", { name: "Media" }).click();
   await page.getByRole("button", { name: /Hood, no photos/ }).click();
@@ -96,6 +105,17 @@ test("photos stay on the phone and a scope waits for signal", async ({ page, con
   fs.writeFileSync(file, png);
   await page.locator("input[data-purpose=gallery]").setInputFiles(file);
   await expect(page.getByRole("button", { name: /Hood, 1 photo/ })).toBeVisible();
+  await page.getByRole("button", { name: "Back to photos" }).click();
+  await expect(page.getByRole("button", { name: /Hood, 1 photo/ })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByText("Tap a panel again to change it.")).toBeVisible();
+  await expect(page.getByText("PDR 1 dime").first()).toBeVisible();
+  await page.goForward();
+  await expect(page.getByRole("button", { name: /Hood, 1 photo/ })).toBeVisible();
+  await page.getByRole("button", { name: /Hood, 1 photo/ }).click();
+  await page.goBack();
+  await expect(page.getByRole("button", { name: /Hood, 1 photo/ })).toBeVisible();
+  await page.getByRole("button", { name: /Hood, 1 photo/ }).click();
   await page.getByLabel("Photo note").fill("Crease along the edge");
   await expect.poll(async () => page.evaluate(async () => {
     const db = await new Promise((resolve, reject) => {
@@ -130,6 +150,24 @@ test("photos stay on the phone and a scope waits for signal", async ({ page, con
   await expect(page.getByRole("dialog", { name: "NTX Hail estimate form" })).toBeVisible();
   await page.getByRole("button", { name: "Submitted" }).click();
   await expect(page.getByText("Sent").first()).toBeVisible();
+});
+
+test("the download page lists photos for one packet", async ({ page }) => {
+  await page.route("**/storage/v1/object/public/**/manifest.json", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      vehicle: "2020 Camry",
+      photos: [{ path: "media/Panels/Hood/01.jpg", tab: "Panels", tile: "Hood", kind: "image", note: "edge" }],
+    }),
+  }));
+  await page.goto("/?packet=packet-test");
+  await expect(page.getByRole("heading", { name: "Estimate download" })).toBeVisible();
+  await expect(page.getByText("Panels")).toBeVisible();
+  await expect(page.getByText("Hood")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Download all (zip)" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Download PDF" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Download", exact: true })).toBeVisible();
 });
 
 test("the cached app opens with no signal", async ({ page, context }) => {

@@ -17,3 +17,8 @@ export const GHL_FIELDS = {
   phone: "phone",
   estimate_summary: "estimate_summary",
 };
+
+// Public photo storage. PACKET_KEY is the client publishable key, not a service key.
+export const PACKET_URL = "https://vvomivvdnmzfaaawnbxx.supabase.co";
+export const PACKET_KEY = "sb_publishable_YZaspkEqFiHu5T6Ul_MASA_zWvlWKTw";
+export const PACKET_BUCKET = "packets";

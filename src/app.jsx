@@ -1,21 +1,24 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { Fragment, useState, useCallback, useRef, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ADDONS, PANEL_LABELS, RI_OPERATIONS, DENT_SIZES, DENT_SIZE_LABELS,
   DEFAULT_LABOR_RATE, CARRIERS, carrierHasMatrix, getMaxCount, quotePanel,
   VEHICLE_YEARS, VEHICLE_DATA, VEHICLE_MAKES, decodeVIN,
   activePanels, grandTotalOf, maxDentCount,
-  buildEstimateSummary, ESTIMATE_DISCLAIMER, validateLead, parseGhlForm,
+  buildEstimateSummary, validateLead, parseGhlForm,
   buildGhlEmbedUrl, reportDocument, buildEstimatePdf, estimatePdfName,
   blankVehicle, estimateHasWork, createEstimateId, parseDraft, parseSavedEstimates,
   estimateTitle, normalizeEstimate, formatPanelDamage, formatSizeList, vehicleSizeTotals,
-  panelDentTotal, totalSizeCount, syncStatusLabel, queueForSync, confirmScopeSent,
+  panelDentTotal, syncStatusLabel, queueForSync, confirmScopeSent, dentCount, dentSize, majorityFromCounts,
   pruneScopes, buildZip, buildPacketHtml, mediaExportPath, groupPhotosForReport,
   DRAFT_STORAGE_KEY, SAVED_STORAGE_KEY,
 } from "./hail-logic.js";
 import { GHL_FORM, GHL_SUMMARY_FIELD_ID } from "./config.js";
 import { deleteScope, loadScopes, readMeta, saveMeta, saveScope } from "./idb.js";
 import { MediaScreen } from "./media-screen.jsx";
+import { WheelPicker } from "./wheel-picker.jsx";
+import { DownloadPage } from "./download-page.jsx";
+import { uploadPacket } from "./packet-store.js";
 
 const PANEL_SHORT = {
   HOOD: "Hood", ROOF: "Roof", TRUNK: "Trunk",
@@ -111,17 +114,18 @@ function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
 }
 
 
-function countsFromPanel(data) {
-  const counts = { DIME: 0, NICKEL: 0, QUARTER: 0, HALF: 0 };
+function initialDent(data) {
   if (data?.sizeCounts) {
-    for (const size of DENT_SIZES) counts[size] = Math.max(0, Math.min(999, Math.round(Number(data.sizeCounts[size]) || 0)));
-    return counts;
+    const majority = majorityFromCounts(data.sizeCounts);
+    if (majority) return majority;
   }
-  if (data?.size && Object.prototype.hasOwnProperty.call(counts, data.size)) {
-    counts[data.size] = Math.max(0, Math.min(999, Math.round(Number(data.count) || 0)));
-  }
-  return counts;
+  return {
+    size: dentSize(data) || "DIME",
+    count: dentCount(data),
+  };
 }
+
+const PERCENT_ADDONS = ADDONS.filter((addon) => addon.type === "percent");
 
 function CountStepper({ label, value, onChange }) {
   return (
@@ -150,8 +154,10 @@ function CountStepper({ label, value, onChange }) {
 }
 
 function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
-  const [counts, setCounts] = useState(() => countsFromPanel(data));
-  const [addons, setAddons] = useState(data?.addons || []);
+  const starting = initialDent(data);
+  const [size, setSize] = useState(starting.size);
+  const [count, setCount] = useState(starting.count);
+  const [addon, setAddon] = useState((data?.addons || []).find((name) => PERCENT_ADDONS.some((item) => item.name === name)) || "");
   const [osDentCount, setOsDentCount] = useState(data?.osDentCount || 0);
   const [doubleOsCount, setDoubleOsCount] = useState(data?.doubleOsCount || 0);
   const [rrEnabled, setRrEnabled] = useState(data?.rrEnabled || false);
@@ -189,18 +195,17 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
   const toggleRiRr = (id) => setRiRr(prev => ({ ...prev, [id]: !prev[id] }));
 
   const pricedAddons = [
-    ...addons.filter((name) => name !== "Oversized Dent" && name !== "Double OS Dents"),
+    ...(addon ? [addon] : []),
     ...(osDentCount > 0 ? ["Oversized Dent"] : []),
     ...(doubleOsCount > 0 ? ["Double OS Dents"] : []),
   ];
   const quote = quotePanel({
-    panel, carrierId, sizeCounts: counts, addons: pricedAddons, osDentCount, doubleOsCount,
+    panel, carrierId, size, count, addons: pricedAddons, osDentCount, doubleOsCount,
     rrEnabled, rrHours, convEnabled, convHours, riEnabled, laborRate, riTimes, riIncluded,
   });
-  const toggleAddon = (name) => setAddons(prev => prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]);
   const basePrice = quote.basePrice;
-  const countLine = formatSizeList(counts, osDentCount, doubleOsCount);
-  const matrixCount = totalSizeCount(counts);
+  const countLine = formatSizeList({ [size]: count }, osDentCount, doubleOsCount);
+  const matrixCount = count;
   const addonBreakdown = quote.addonBreakdown;
   const addonTotal = quote.addonTotal;
   const nonPdr = quote.nonPdr;
@@ -211,7 +216,6 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
   const totalPrice = quote.totalPrice;
   const blocked = !nonPdr && matrixCount > 0 && quote.rows.length > 0 && basePrice <= 0;
   const emptyPdr = !nonPdr && matrixCount <= 0 && osDentCount <= 0 && doubleOsCount <= 0;
-  const setCount = (size, value) => setCounts((prev) => ({ ...prev, [size]: value }));
 
   const S = styles;
 
@@ -221,7 +225,7 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
         <div style={S.modalHeader}>
           <div>
             <div style={S.modalTitle}>{PANEL_LABELS[panel]}</div>
-            <div style={S.modalSubtitle}>{PANEL_LABELS[panel] || panel} · exact counts</div>
+            <div style={S.modalSubtitle}>{PANEL_LABELS[panel] || panel} · one dent size</div>
           </div>
           <button onClick={onClose} style={S.closeBtn}>✕</button>
         </div>
@@ -248,13 +252,16 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
 
           {!nonPdr && (
             <>
-              <label style={S.fieldLabel}>DENT COUNTS</label>
-              {DENT_SIZES.map((size) => (
-                <CountStepper key={size} label={DENT_SIZE_LABELS[size]} value={counts[size] || 0} onChange={(value) => setCount(size, value)} />
-              ))}
+              <WheelPicker
+                label="Dent size"
+                value={size}
+                onChange={setSize}
+                options={DENT_SIZES.map((item) => ({ id: item, label: DENT_SIZE_LABELS[item] }))}
+              />
+              <CountStepper label="Dent count" value={count} onChange={setCount} />
               <CountStepper label="Oversize" value={osDentCount} onChange={setOsDentCount} />
               <CountStepper label="Double OS" value={doubleOsCount} onChange={setDoubleOsCount} />
-              {countLine.text && <div style={S.priceTag}>{countLine.text}</div>}
+              {count > 0 && <div style={S.priceTag}>{`PDR ${count} ${(DENT_SIZE_LABELS[size] || "").toLowerCase()}`}</div>}
               {matrixCount > 0 && quote.selectedRange && basePrice > 0 && (
                 <div style={S.priceTag}>Range {quote.selectedRange} · priced as {DENT_SIZE_LABELS[quote.size]} · ${basePrice.toLocaleString()}</div>
               )}
@@ -275,23 +282,12 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
                 </div>
               )}
 
-              <label style={S.fieldLabel}>ADD-ONS</label>
-              <div style={S.addonGrid}>
-                {ADDONS.filter((addon) => addon.name !== "Oversized Dent" && addon.name !== "Double OS Dents").map(a => {
-                  const isActive = addons.includes(a.name);
-                  return (
-                    <div key={a.name} style={{ marginBottom: 6 }}>
-                      <button type="button" onClick={() => toggleAddon(a.name)}
-                        style={{ ...S.addonBtn, ...(isActive ? S.addonBtnActive : {}) }}>
-                        <span style={S.addonName}>{a.name}</span>
-                        <span style={{ ...S.addonVal, ...(isActive ? S.addonValActive : {}) }}>
-                          {a.type === "dollar" ? `$${a.value}/ea` : `+${(a.value * 100)}%`}
-                        </span>
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
+              <WheelPicker
+                label="Add-on"
+                value={addon}
+                onChange={setAddon}
+                options={[{ id: "", label: "None" }, ...PERCENT_ADDONS.map((item) => ({ id: item.name, label: `${item.name} +${Math.round(item.value * 100)}%` }))]}
+              />
             </>
           )}
 
@@ -473,7 +469,6 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
             onClick={() => {
               onSave(panel, {
                 count: matrixCount,
-                sizeCounts: counts,
                 selectedRange: nonPdr ? null : quote.selectedRange,
                 size: quote.size,
                 addons: nonPdr ? [] : pricedAddons,
@@ -595,6 +590,38 @@ function VehicleForm({ vehicleInfo, setVehicleInfo, onClose }) {
             : <input style={{ ...styles.vfInput, opacity: 0.4 }} placeholder="Select make first" disabled />}
         </div>
       </div>
+      <div style={{ ...styles.vfGrid, marginTop: 10 }}>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Trim</label><input value={vehicleInfo.trim || ""} onChange={e => setField("trim", e.target.value)} style={styles.vfInput} /></div>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Mileage</label><input value={vehicleInfo.mileage || ""} onChange={e => setField("mileage", e.target.value)} inputMode="numeric" style={styles.vfInput} /></div>
+      </div>
+      <div style={{ ...styles.vfGrid, marginTop: 10 }}>
+        <div style={styles.vfField}><label style={styles.vfLabel}>License</label><input value={vehicleInfo.license || ""} onChange={e => setField("license", e.target.value)} style={styles.vfInput} /></div>
+        <div style={styles.vfField}><label style={styles.vfLabel}>State</label><input value={vehicleInfo.plateState || ""} onChange={e => setField("plateState", e.target.value)} style={styles.vfInput} /></div>
+      </div>
+      <div style={{ ...styles.vfGrid, marginTop: 10 }}>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Exterior color</label><input value={vehicleInfo.color || ""} onChange={e => setField("color", e.target.value)} style={styles.vfInput} /></div>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Customer</label><input value={vehicleInfo.customer || ""} onChange={e => setField("customer", e.target.value)} style={styles.vfInput} /></div>
+      </div>
+      <div style={{ ...styles.vfGrid, marginTop: 10 }}>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Written by</label><input value={vehicleInfo.writtenBy || ""} onChange={e => setField("writtenBy", e.target.value)} style={styles.vfInput} /></div>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Insured</label><input value={vehicleInfo.insured || ""} onChange={e => setField("insured", e.target.value)} style={styles.vfInput} /></div>
+      </div>
+      <div style={{ ...styles.vfGrid, marginTop: 10 }}>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Policy #</label><input value={vehicleInfo.policy || ""} onChange={e => setField("policy", e.target.value)} style={styles.vfInput} /></div>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Date of loss</label><input value={vehicleInfo.lossDate || ""} onChange={e => setField("lossDate", e.target.value)} style={styles.vfInput} /></div>
+      </div>
+      <div style={{ ...styles.vfGrid, marginTop: 10 }}>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Type of loss</label><input value={vehicleInfo.typeOfLoss || ""} onChange={e => setField("typeOfLoss", e.target.value)} style={styles.vfInput} /></div>
+        <div style={styles.vfField}><label style={styles.vfLabel}>Point of impact</label><input value={vehicleInfo.pointOfImpact || ""} onChange={e => setField("pointOfImpact", e.target.value)} style={styles.vfInput} /></div>
+      </div>
+      <div style={{ marginTop: 10 }}>
+        <label style={styles.vfLabel}>Inspection location</label>
+        <input value={vehicleInfo.inspectionLocation || ""} onChange={e => setField("inspectionLocation", e.target.value)} style={styles.vfInput} />
+      </div>
+      <div style={{ marginTop: 10 }}>
+        <label style={styles.vfLabel}>Prior damage notes</label>
+        <textarea value={vehicleInfo.priorNotes || ""} onChange={e => setField("priorNotes", e.target.value)} rows={3} style={{ ...styles.vfInput, minHeight: 72 }} />
+      </div>
       <button onClick={onClose} style={styles.vfDone}>Done</button>
     </div>
   );
@@ -638,7 +665,7 @@ function LeadCapture({ summary, onQueue }) {
   return (
     <form onSubmit={handleSubmit} style={S.leadCard}>
       <div style={S.sectionLabel}>Send this estimate</div>
-      <p style={S.leadIntro}>Name and phone so NTX Hail can follow up. Email is optional. The estimate above is included. On the next screen, check the consent boxes and submit the form. Photos stay on this phone until you use Share / Export.</p>
+      <p style={S.leadIntro}>Name and phone so NTX Hail can follow up. Email is optional. The estimate above is included. Photos upload with this estimate when there is signal, and the form gets one link to download them. Share / Export keeps a backup on this phone.</p>
       <label style={S.leadLabel}>Name
         <input value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" style={S.leadInput} />
       </label>
@@ -657,7 +684,6 @@ function LeadCapture({ summary, onQueue }) {
       <div style={S.summaryPreview}>{summary}</div>
       <button type="submit" style={{ ...S.saveBtn, width: "100%", minHeight: 48 }}>Send to NTX Hail</button>
       {errors.form && <div style={S.leadError}>{errors.form}</div>}
-      <p style={S.disclaimer}>{ESTIMATE_DISCLAIMER}</p>
     </form>
   );
 }
@@ -685,6 +711,9 @@ function HailEstimator() {
   const [lead, setLead] = useState(null);
   const [queuedAt, setQueuedAt] = useState("");
   const [sentAt, setSentAt] = useState("");
+  const [packetId, setPacketId] = useState("");
+  const [packetUrl, setPacketUrl] = useState("");
+  const [packetStatus, setPacketStatus] = useState("");
   const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
   const [embedUrl, setEmbedUrl] = useState("");
   const [frameReady, setFrameReady] = useState(false);
@@ -692,6 +721,7 @@ function HailEstimator() {
   const [installEvent, setInstallEvent] = useState(null);
   const [showInstall, setShowInstall] = useState(false);
   const attemptedRef = useRef(new Set());
+  const uploadGen = useRef(0);
   const scopeRef = useRef(null);
   const writeQueue = useRef(Promise.resolve());
   const activeCarrier = CARRIERS.find((c) => c.id === carrierId) || CARRIERS[0];
@@ -706,6 +736,9 @@ function HailEstimator() {
     setLead(scope.lead || null);
     setQueuedAt(scope.queuedAt || "");
     setSentAt(scope.sentAt || "");
+    setPacketId(scope.packetId || "");
+    setPacketUrl(scope.packetUrl || "");
+    setPacketStatus(scope.packetStatus || "");
   };
   scopeRef.current = estimateId ? {
     id: estimateId,
@@ -719,6 +752,9 @@ function HailEstimator() {
     lead,
     queuedAt,
     sentAt,
+    packetId,
+    packetUrl,
+    packetStatus,
   } : null;
 
   const persistScope = useCallback((scope) => {
@@ -796,7 +832,7 @@ function HailEstimator() {
     setSaveStatus("saving");
     const timer = setTimeout(() => { persistScope(scopeRef.current); }, 400);
     return () => clearTimeout(timer);
-  }, [hydrated, estimateId, createdAt, vehicleInfo, panelData, carrierId, photos, syncStatus, lead, queuedAt, sentAt, persistScope]);
+  }, [hydrated, estimateId, createdAt, vehicleInfo, panelData, carrierId, photos, syncStatus, lead, queuedAt, sentAt, packetId, packetUrl, packetStatus, persistScope]);
 
   useEffect(() => {
     if (!hydrated) return undefined;
@@ -839,9 +875,9 @@ function HailEstimator() {
     if (!hydrated || !online || embedUrl) return undefined;
     const current = scopeRef.current;
     const queued = [];
-    if (current?.syncStatus === "queued" && current.lead) queued.push(current);
+    if (current?.syncStatus === "queued" && current.lead && current.packetStatus === "uploaded") queued.push(current);
     for (const scope of library) {
-      if (scope.id !== current?.id && scope.syncStatus === "queued" && scope.lead) queued.push(scope);
+      if (scope.id !== current?.id && scope.syncStatus === "queued" && scope.lead && scope.packetStatus === "uploaded") queued.push(scope);
     }
     const next = queued.find((scope) => !attemptedRef.current.has(scope.id));
     if (!next) return undefined;
@@ -852,6 +888,7 @@ function HailEstimator() {
       carrierLabel: carrier.label,
       grandTotal: grandTotalOf(next.panelData),
       photos: next.photos,
+      packetUrl: next.packetUrl,
     });
     const url = buildGhlEmbedUrl({
       formValue: GHL_FORM,
@@ -865,7 +902,7 @@ function HailEstimator() {
     setFrameReady(false);
     setEmbedUrl(url);
     return undefined;
-  }, [hydrated, online, embedUrl, syncStatus, library, estimateId, lead]);
+  }, [hydrated, online, embedUrl, syncStatus, library, estimateId, lead, packetStatus, packetUrl]);
 
   const handleSavePanel = useCallback((panel, data) => setPanelData((prev) => ({ ...prev, [panel]: data })), []);
   const handleDeletePanel = useCallback((panel) => setPanelData((prev) => {
@@ -890,6 +927,9 @@ function HailEstimator() {
       setLead(null);
       setQueuedAt("");
       setSentAt("");
+      setPacketId("");
+      setPacketUrl("");
+      setPacketStatus("");
       setView("estimate");
       setSelectedPanel(null);
       setShowVehicleForm(false);
@@ -944,15 +984,19 @@ function HailEstimator() {
     setQueuedAt(queued.queuedAt);
     setSentAt("");
     attemptedRef.current.delete(estimateId);
+    const nextPacketId = scopeRef.current?.packetId || packetId || (crypto.randomUUID ? crypto.randomUUID() : `pkt_${Date.now()}`);
+    setPacketId(nextPacketId);
+    if (packetStatus !== "uploaded") setPacketStatus("pending");
+    scopeRef.current = { ...(scopeRef.current || {}), ...queued, packetId: nextPacketId, packetStatus: packetStatus === "uploaded" ? "uploaded" : "pending" };
     setSyncMessage(online
-      ? "Opening the NTX Hail form. Submit it there, then tap Submitted."
-      : "Waiting for signal. This scope stays on the phone until the form goes through.");
+      ? "Uploading the PDF and photos. The form opens when that finishes."
+      : "Waiting for signal. Photos stay on the phone until they upload.");
   };
 
   const handleConfirmSent = () => {
     const id = syncingId || estimateId;
     const source = id === estimateId ? scopeRef.current : library.find((item) => item.id === id);
-    const result = confirmScopeSent({ ...(source || {}), syncStatus: "queued", id }, { frameLoaded: frameReady });
+    const result = confirmScopeSent({ ...(source || {}), syncStatus: "queued", id }, { frameLoaded: frameReady, uploadsReady: source?.packetStatus === "uploaded" });
     if (!result.ok) return;
     if (id === estimateId) {
       setSyncStatus("sent");
@@ -991,6 +1035,7 @@ function HailEstimator() {
     carrierLabel: activeCarrier.label,
     grandTotal,
     photos,
+    packetUrl,
   });
   const sizeTotals = vehicleSizeTotals(panelData);
   const photoGroups = groupPhotosForReport(photos);
@@ -1126,6 +1171,125 @@ function HailEstimator() {
     }
   };
 
+  useEffect(() => {
+    if (!hydrated || !online) return undefined;
+    setPacketStatus((status) => (status === "error" ? "pending" : status));
+    return undefined;
+  }, [hydrated, online]);
+
+  useEffect(() => {
+    if (!hydrated) return undefined;
+    if (!history.state?.hailspec) history.replaceState({ hailspec: "estimate" }, "");
+    const onPop = () => {
+      const next = history.state?.hailspec || "estimate";
+      if (next !== "editor") setSelectedPanel(null);
+      if (next !== "sheet") window.dispatchEvent(new CustomEvent("hailspec-nav", { detail: "close-sheet" }));
+      if (next === "sheet" || next === "media") setView("media");
+      else if (next === "review") setView("review");
+      else if (next !== "editor") setView("estimate");
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [hydrated]);
+
+  useEffect(() => {
+    if (!hydrated || !online || syncStatus !== "queued" || packetStatus !== "pending") return undefined;
+    const scope = scopeRef.current;
+    if (!scope?.lead || !scope.packetId) return undefined;
+    const gen = uploadGen.current + 1;
+    uploadGen.current = gen;
+    let stopped = false;
+    (async () => {
+      try {
+        const carrier = CARRIERS.find((item) => item.id === scope.carrierId) || CARRIERS[0];
+        const pdfBytes = buildEstimatePdf({
+          vehicleInfo: scope.vehicleInfo,
+          panelData: scope.panelData,
+          carrierLabel: carrier.label,
+          grandTotal: grandTotalOf(scope.panelData),
+          photos: scope.photos,
+        });
+        const files = [];
+        const manifestPhotos = [];
+        for (let index = 0; index < (scope.photos || []).length; index += 1) {
+          const photo = scope.photos[index];
+          const filePath = mediaExportPath(photo, index);
+          const bytes = await bytesFromPhoto(photo);
+          if (!bytes) continue;
+          files.push({
+            path: filePath,
+            bytes,
+            contentType: photo.kind === "video" ? (photo.blob?.type || "video/mp4") : "image/jpeg",
+          });
+          manifestPhotos.push({
+            path: filePath,
+            tab: photo.tabLabel || "Photos",
+            tile: photo.tileLabel || "Photo",
+            note: photo.note || "",
+            kind: photo.kind === "video" ? "video" : "image",
+          });
+        }
+        if (stopped || uploadGen.current !== gen) return;
+        const vehicle = [scope.vehicleInfo?.year, scope.vehicleInfo?.make, scope.vehicleInfo?.model].filter(Boolean).join(" ");
+        const result = await uploadPacket({
+          id: scope.packetId,
+          pdfBytes,
+          files,
+          manifest: { vehicle, photos: manifestPhotos },
+        });
+        if (stopped || uploadGen.current !== gen) return;
+        if (result.ok) {
+          setPacketUrl(result.url);
+          setPacketStatus("uploaded");
+          scopeRef.current = { ...scopeRef.current, packetId: scope.packetId, packetUrl: result.url, packetStatus: "uploaded" };
+          setSyncMessage("Photos and the PDF are ready. Submit the form, then tap Submitted.");
+        } else if (result.error !== "offline") {
+          setPacketStatus("error");
+          scopeRef.current = { ...scopeRef.current, packetStatus: "error" };
+          setSyncMessage("Upload did not finish. It will retry when there is signal.");
+        }
+      } catch (err) {
+        console.error("[HailSpec] Packet upload failed", err);
+        if (!stopped && uploadGen.current === gen) {
+          setPacketStatus("error");
+          scopeRef.current = { ...scopeRef.current, packetStatus: "error" };
+          setSyncMessage("Upload did not finish. It will retry when there is signal.");
+        }
+      }
+    })();
+    return () => { stopped = true; };
+  }, [hydrated, online, syncStatus, packetStatus, packetId]);
+
+  const goView = (next) => {
+    const here = history.state?.hailspec || view;
+    if (next === "estimate" && (here === "media" || here === "review")) {
+      history.back();
+      return;
+    }
+    if (next === "estimate" && here === "sheet") {
+      history.go(-2);
+      return;
+    }
+    if (here === next) {
+      setView(next);
+      return;
+    }
+    history.pushState({ hailspec: next }, "");
+    setView(next);
+  };
+
+  const openPanel = (id) => {
+    if (history.state?.hailspec !== "editor") history.pushState({ hailspec: "editor" }, "");
+    setSelectedPanel(id);
+  };
+
+  const closePanel = () => {
+    if (history.state?.hailspec === "editor") history.back();
+    else setSelectedPanel(null);
+  };
+
+  if (hydrated && !history.state?.hailspec) history.replaceState({ hailspec: "estimate" }, "");
+
   const S = styles;
   const vehicleLabel = [vehicleInfo.year, vehicleInfo.make, vehicleInfo.model].filter(Boolean).join(" ");
   const report = reportDocument({ vehicleInfo, panelData, carrierLabel: activeCarrier.label, grandTotal });
@@ -1192,20 +1356,13 @@ function HailEstimator() {
 
       {showVehicleForm && <VehicleForm vehicleInfo={vehicleInfo} setVehicleInfo={setVehicleInfo} onClose={() => setShowVehicleForm(false)} />}
 
-      <div style={S.carrierBar}>
-        <div style={S.carrierBarLabel}>CARRIER</div>
-        <div style={S.carrierScroll}>
-          {CARRIERS.map((carrier) => {
-            const isActive = carrierId === carrier.id;
-            const hasMatrix = carrierHasMatrix(carrier.id);
-            return (
-              <button key={carrier.id} type="button" onClick={() => handleCarrier(carrier.id)}
-                style={{ ...S.carrierChip, ...(isActive ? { background: carrier.color, color: "#fff", borderColor: carrier.color } : {}), ...(!hasMatrix && !isActive ? { opacity: 0.7 } : {}) }}>
-                {carrier.label}
-              </button>
-            );
-          })}
-        </div>
+      <div style={{ ...S.body, paddingBottom: 0 }}>
+        <WheelPicker
+          label="Hail matrix"
+          value={carrierId}
+          onChange={handleCarrier}
+          options={CARRIERS.map((carrier) => ({ id: carrier.id, label: carrier.label }))}
+        />
       </div>
 
       {carrierId !== "state_farm" && !carrierHasMatrix(carrierId) && (
@@ -1215,11 +1372,11 @@ function HailEstimator() {
       )}
 
       <div style={S.tabs}>
-        <button type="button" onClick={() => setView("estimate")} style={{ ...S.tab, ...(view === "estimate" ? S.tabActive : {}) }}>Estimate</button>
-        <button type="button" onClick={() => setView("media")} style={{ ...S.tab, ...(view === "media" ? S.tabActive : {}) }}>
+        <button type="button" onClick={() => goView("estimate")} style={{ ...S.tab, ...(view === "estimate" ? S.tabActive : {}) }}>Estimate</button>
+        <button type="button" onClick={() => goView("media")} style={{ ...S.tab, ...(view === "media" ? S.tabActive : {}) }}>
           Media{photos.length > 0 && <span style={S.badge}>{photos.length}</span>}
         </button>
-        <button type="button" onClick={() => setView("review")} style={{ ...S.tab, ...(view === "review" ? S.tabActive : {}) }}>
+        <button type="button" onClick={() => goView("review")} style={{ ...S.tab, ...(view === "review" ? S.tabActive : {}) }}>
           Review{panels.length > 0 && <span style={S.badge}>{panels.length}</span>}
         </button>
       </div>
@@ -1232,13 +1389,12 @@ function HailEstimator() {
             <div style={S.stat}><div style={{ ...S.statVal, color: "#2563eb" }}>${grandTotal.toLocaleString("en-US")}</div><div style={S.statLabel}>Total</div></div>
           </div>
           {sizeTotals.text && <p style={S.dentTotals}>{sizeTotals.text}</p>}
-          <p style={S.disclaimer}>{ESTIMATE_DISCLAIMER}</p>
           <div style={S.carSection}>
             <div style={S.sectionHead}>
               <div style={{ ...S.sectionLabel, marginBottom: 0 }}>Tap a panel</div>
               <button type="button" onClick={() => setShowVehicleForm((open) => !open)} style={S.inlineBtn}>Vehicle</button>
             </div>
-            <CarSilhouette panelData={panelData} selectedPanel={selectedPanel} onSelectPanel={setSelectedPanel} />
+            <CarSilhouette panelData={panelData} selectedPanel={selectedPanel} onSelectPanel={openPanel} />
             <p style={S.tapHint}>{panels.length ? "Tap a panel again to change it." : "Tap a panel on the vehicle to add damage."}</p>
             <div style={S.legend}>
               {[["None", "#f1f5f9"], ["Low", "rgba(37,99,235,0.35)"], ["Med", "rgba(59,130,246,0.5)"], ["High", "rgba(249,115,22,0.55)"], ["Severe", "rgba(220,38,38,0.65)"]].map(([label, color]) => (
@@ -1250,7 +1406,7 @@ function HailEstimator() {
             <div style={S.section}>
               <div style={S.sectionLabel}>Damage log</div>
               {panels.map(([key, data]) => (
-                <button key={key} type="button" onClick={() => setSelectedPanel(key)} style={S.logItem}>
+                <button key={key} type="button" onClick={() => openPanel(key)} style={S.logItem}>
                   <div style={{ minWidth: 0 }}>
                     <div style={S.logPanel}>{PANEL_LABELS[key]}</div>
                     <div style={S.logMeta}>{formatPanelDamage(data)}{(data.addons || []).length > 0 ? " • add-on" : ""}{data.riEnabled ? " • R&I" : ""}</div>
@@ -1258,7 +1414,7 @@ function HailEstimator() {
                   <div style={S.logPrice}>${Number(data.totalPrice || 0).toLocaleString("en-US")}</div>
                 </button>
               ))}
-              <button type="button" onClick={() => setView("review")} style={{ ...S.saveBtn, width: "100%", marginTop: 8 }}>Review and send</button>
+              <button type="button" onClick={() => goView("review")} style={{ ...S.saveBtn, width: "100%", marginTop: 8 }}>Review and send</button>
             </div>
           )}
         </div>
@@ -1266,7 +1422,7 @@ function HailEstimator() {
 
       {view === "media" && (
         <div style={S.body}>
-          <MediaScreen photos={photos} panelData={panelData} onChange={setPhotos} onEditPanel={setSelectedPanel} />
+          <MediaScreen photos={photos} panelData={panelData} onChange={setPhotos} onEditPanel={openPanel} onBack={() => goView("estimate")} />
         </div>
       )}
 
@@ -1276,7 +1432,7 @@ function HailEstimator() {
             <div style={S.emptyState}>
               <div style={{ fontWeight: 700, marginBottom: 4 }}>No panels yet</div>
               <div style={{ color: "#64748b", fontSize: 14 }}>Add damage on the Estimate tab, then come back to send it.</div>
-              <button type="button" onClick={() => setView("estimate")} style={{ ...S.saveBtn, marginTop: 16 }}>Back to estimate</button>
+              <button type="button" onClick={() => goView("estimate")} style={{ ...S.saveBtn, marginTop: 16 }}>Back to estimate</button>
             </div>
           ) : (
             <>
@@ -1306,8 +1462,10 @@ function HailEstimator() {
                   </div>
                 </div>
               </div>
-              <p style={S.disclaimer}>{ESTIMATE_DISCLAIMER}</p>
               <p style={S.statusLine} role="status">{syncStatusLabel(syncStatus)}{syncMessage ? ` · ${syncMessage}` : ""}</p>
+              {packetStatus === "error" && syncStatus === "queued" && (
+                <button type="button" onClick={() => setPacketStatus("pending")} style={{ ...S.saveBtn, width: "100%", marginBottom: 8 }}>Retry upload</button>
+              )}
               <LeadCapture summary={summary} onQueue={handleQueueLead} />
               <div style={S.section}>
                 <div style={S.sectionLabel}>Export</div>
@@ -1332,7 +1490,7 @@ function HailEstimator() {
                 <div style={S.section}>
                   <div style={S.sectionHead}>
                     <div style={{ ...S.sectionLabel, marginBottom: 0 }}>Photos ({photos.length})</div>
-                    <button type="button" onClick={() => setView("media")} style={S.inlineBtn}>Open media</button>
+                    <button type="button" onClick={() => goView("media")} style={S.inlineBtn}>Open media</button>
                   </div>
                   <div style={S.photoGrid}>{photos.filter((photo) => photo.thumb || photo.url).slice(0, 6).map((photo) => <img key={photo.id} src={photo.thumb || photo.url} alt="" style={S.reviewPhoto} />)}</div>
                 </div>
@@ -1343,7 +1501,7 @@ function HailEstimator() {
       )}
 
       {selectedPanel && (
-        <PanelEditor panel={selectedPanel} data={panelData[selectedPanel]} carrierId={carrierId} onSave={handleSavePanel} onDelete={handleDeletePanel} onClose={() => setSelectedPanel(null)} />
+        <PanelEditor panel={selectedPanel} data={panelData[selectedPanel]} carrierId={carrierId} onSave={handleSavePanel} onDelete={handleDeletePanel} onClose={closePanel} />
       )}
       {showSaved && (
         <div style={S.modalOverlay} role="dialog" aria-modal="true" aria-label="Saved estimates" onClick={() => setShowSaved(false)}>
@@ -1383,36 +1541,77 @@ function HailEstimator() {
     </div>
     <article className="print-sheet" aria-hidden="true">
       <header className="print-header">
-        <div className="print-brand">NTX HAIL</div>
-        <div className="print-kicker">HailSpec estimate</div>
-        <p>{report.carrier} · {report.date}</p>
+        <div className="print-brand">{report.shop.web}</div>
+        <div>{report.shop.legal}</div>
+        <div>Federal ID {report.shop.federalId}</div>
+        <div>{report.shop.address}</div>
+        <h1>{report.title}</h1>
+        <p>Customer: {report.customer}</p>
+        <p>Written By: {report.writtenBy}</p>
+        <p>{report.dateTime}</p>
       </header>
-      <dl className="print-meta">
-        <div><dt>Owner</dt><dd>{report.owner}</dd></div>
-        <div><dt>Vehicle</dt><dd>{report.vehicle}</dd></div>
-        <div><dt>VIN</dt><dd>{report.vin}</dd></div>
-        <div><dt>Claim #</dt><dd>{report.claim}</dd></div>
-      </dl>
+      <p>Insured: {report.insured} &nbsp; Policy #: {report.policy} &nbsp; Claim #: {report.claim}</p>
+      <p>Type of Loss: {report.typeOfLoss} &nbsp; Date of Loss: {report.lossDate} &nbsp; Point of Impact: {report.pointOfImpact}</p>
+      <p>Owner: {report.owner} &nbsp; Inspection Location: {report.inspectionLocation} &nbsp; Insurance Company: {report.carrier}</p>
+      <h2>VEHICLE</h2>
+      <p>{[report.vehicle, report.trim].filter(Boolean).join(" ")}</p>
+      <p>VIN: {report.vin} &nbsp; Mileage: {report.mileage} &nbsp; License: {report.license} &nbsp; State: {report.plateState} &nbsp; Color: {report.color}</p>
       <table>
-        <thead><tr><th>Panel</th><th>Damage</th><th>Price</th></tr></thead>
+        <thead><tr><th>Line</th><th>Oper</th><th>Description</th><th>Qty</th><th>Extended Price $</th><th>Labor</th><th>Paint</th></tr></thead>
         <tbody>
-          {report.panels.length === 0 ? (
-            <tr><td colSpan={3}>No panels estimated.</td></tr>
-          ) : report.panels.map((panel) => (
-            <tr key={panel.name}>
-              <td>{panel.name}</td>
-              <td>{panel.detail}</td>
-              <td className="amt">${panel.amount.toLocaleString("en-US")}</td>
-            </tr>
+          {report.lines.length === 0 ? (
+            <tr><td colSpan={7}>No panels estimated.</td></tr>
+          ) : report.lines.map((group) => (
+            <Fragment key={group.group}>
+              <tr className="print-group"><td colSpan={7}>{group.group}</td></tr>
+              {group.rows.map((row) => (
+                <Fragment key={row.line}>
+                  <tr>
+                    <td>{row.line}</td>
+                    <td>{row.oper}</td>
+                    <td>{row.description}</td>
+                    <td>{row.qty}</td>
+                    <td className="amt">{row.extended ? `$${Number(row.extended).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}</td>
+                    <td className="amt">{row.labor ? `$${Number(row.labor).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}</td>
+                    <td className="amt">{row.paint ? `$${Number(row.paint).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}</td>
+                  </tr>
+                  {row.note ? <tr><td></td><td></td><td colSpan={5}>Note: {row.note}</td></tr> : null}
+                </Fragment>
+              ))}
+            </Fragment>
           ))}
           <tr className="print-total">
-            <td colSpan={2}>Grand total</td>
-            <td className="amt">${report.grandTotal.toLocaleString("en-US")}</td>
+            <td colSpan={4}>SUBTOTALS</td>
+            <td className="amt">${Number(report.totals.pdr || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+            <td className="amt">${Number(report.totals.bodyLabor || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+            <td></td>
           </tr>
         </tbody>
       </table>
-      <p className="print-disclaimer">{report.disclaimer}</p>
-      {report.sizeTotals && <p className="print-disclaimer">{report.sizeTotals}</p>}
+      <h2>NOTES</h2>
+      <p>Prior Damage Notes: {report.priorNotes}</p>
+      <h2>ESTIMATE TOTALS</h2>
+      <table>
+        <thead><tr><th>Category</th><th>Basis</th><th>Rate</th><th>Cost $</th></tr></thead>
+        <tbody>
+          {[
+            ["Parts", report.totals.parts],
+            ["Body Labor", report.totals.bodyLabor],
+            ["Paint Labor", report.totals.paintLabor],
+            ["PDR", report.totals.pdr],
+            ["Other Charges", report.totals.other],
+            ["Subtotal", report.totals.subtotal],
+            ["Sales Tax", report.totals.tax],
+            ["Grand Total", report.totals.grand],
+          ].map(([name, cost]) => (
+            <tr key={name} className={name === "Grand Total" ? "print-total" : ""}>
+              <td>{name}</td><td></td><td></td>
+              <td className="amt">${Number(cost || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <h2>PHOTO APPENDIX</h2>
       {photoGroups.map((group) => (
         <section key={`${group.tab}-${group.tile}`}>
           <h2 className="print-kicker">{group.tab}</h2>
@@ -1438,7 +1637,7 @@ function HailEstimator() {
         <div style={S.ghlBar}>
           <div style={{ minWidth: 0 }}>
             <div style={S.ghlTitle}>Send to NTX Hail</div>
-            <p style={S.ghlHint}>Check the consent boxes and submit the form. Then tap Submitted. Photos are not attached here — use Share / Export for those.</p>
+            <p style={S.ghlHint}>Check the consent boxes and submit the form. Then tap Submitted. The form includes one link to the photos and the PDF.</p>
           </div>
           <button type="button" onClick={handleConfirmSent} disabled={!frameReady} style={{ ...S.ghlClose, background: frameReady ? "#2563eb" : "#e2e8f0", color: frameReady ? "#fff" : "#64748b" }}>Submitted</button>
           <button type="button" onClick={handleCloseForm} style={S.ghlClose}>Close</button>
@@ -1825,5 +2024,6 @@ const styles = {
 
     
 
+const packetId = new URLSearchParams(window.location.search).get("packet");
 const root = createRoot(document.getElementById("root"));
-root.render(<HailEstimator />);
+root.render(packetId ? <DownloadPage packetId={packetId} /> : <HailEstimator />);

@@ -1,4 +1,4 @@
-const CACHE = "hailspec-shell-v1";
+const CACHE = "hailspec-shell-v2";
 const SHELL = [
   "./",
   "./index.html",

@@ -1,6 +1,6 @@
 export const MAX_IMAGE_PHOTOS = 60;
 export const MAX_VIDEOS = 6;
-export const MAX_VIDEO_BYTES = 80 * 1024 * 1024;
+export const MAX_VIDEO_BYTES = 45 * 1024 * 1024;
 
 function canvasBlob(image, maxEdge, quality) {
   const scale = Math.min(1, maxEdge / Math.max(image.width, image.height, 1));

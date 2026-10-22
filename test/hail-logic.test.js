@@ -22,7 +22,6 @@ import {
   estimatePdfName,
   validateLead,
   parseGhlForm,
-  ESTIMATE_DISCLAIMER,
   carrierHasMatrix,
   GHL_SUMMARY_LIMIT,
   formatPanelLine,
@@ -91,7 +90,7 @@ test("VIN decode reads make and model year", () => {
   assert.equal(decodeVIN("SHORT"), null);
 });
 
-test("downloaded report escapes vehicle text and keeps the disclaimer", () => {
+test("downloaded report escapes vehicle text and names the shop", () => {
   const html = generateReportHTML(
     { owner: '<script>alert("x")</script>', year: "2020", make: "Toyota", model: "Camry", vin: "4T1BF1FK5HU123456", claim: "A&B" },
     {
@@ -111,7 +110,9 @@ test("downloaded report escapes vehicle text and keeps the disclaimer", () => {
   assert.equal(html.includes("<script>alert"), false);
   assert.ok(html.includes("&lt;script&gt;"));
   assert.ok(html.includes("A&amp;B"));
-  assert.ok(html.includes(ESTIMATE_DISCLAIMER));
+  assert.ok(html.includes("WWW.NTXHAIL.COM"));
+  assert.ok(html.includes("Federal ID 84-5170282"));
+  assert.equal(html.includes("repair estimate only"), false);
   assert.equal(html.includes("javascript:alert"), false);
   assert.equal(/deductible waived/i.test(html), false);
   assert.equal(/cash rebate/i.test(html), false);
@@ -124,9 +125,9 @@ test("estimate summary includes the result and no waiver promise", () => {
     carrierLabel: "State Farm",
     grandTotal: 175,
   });
-  assert.match(summary, /Hood: 6 - 15 nickel dents — \$175/);
+  assert.match(summary, /Hood: PDR 15 nickel — \$175/);
   assert.match(summary, /Grand total: \$175/);
-  assert.ok(summary.includes(ESTIMATE_DISCLAIMER));
+  assert.equal(summary.includes("repair estimate only"), false);
   assert.equal(/waive your deductible/i.test(summary), false);
 });
 
@@ -141,7 +142,7 @@ test("email is optional and a bad email still fails", () => {
 });
 
 test("a short summary is left as written", () => {
-  const text = "Hood: 6 - 15 nickel dents — $175\n\nGrand total: $175\n" + ESTIMATE_DISCLAIMER;
+  const text = "Hood: PDR 15 nickel — $175\n\nGrand total: $175";
   assert.equal(fitSummaryForUrl(text), text.trim());
 });
 
@@ -153,14 +154,13 @@ test("a huge summary drops extra panels and stays within the URL limit", () => {
     ...panels,
     "",
     "Grand total: $9999",
-    ESTIMATE_DISCLAIMER,
   ].join("\n");
   const fitted = fitSummaryForUrl(summary, GHL_SUMMARY_LIMIT);
   assert.ok(fitted.length <= GHL_SUMMARY_LIMIT);
   assert.match(fitted, /Panel 0:/);
   assert.match(fitted, /more panel/);
   assert.match(fitted, /Grand total: \$9999/);
-  assert.ok(fitted.includes(ESTIMATE_DISCLAIMER));
+  assert.equal(fitted.includes("repair estimate only"), false);
   assert.equal(fitted.includes("Panel 39:"), false);
 });
 
@@ -237,61 +237,84 @@ test("the downloaded estimate is a real PDF with the panel total", () => {
   };
   const doc = reportDocument(input, when);
   assert.equal(doc.panels[0].name, "Hood");
-  assert.match(doc.panels[0].detail, /1 - 5 dime dents/);
+  assert.match(doc.panels[0].detail, /PDR 5 dime/);
+  assert.equal(doc.title, "Preliminary Estimate");
+  assert.equal(doc.shop.federalId, "84-5170282");
   const bytes = buildEstimatePdf(input, when);
   const text = new TextDecoder().decode(bytes);
   assert.equal(text.startsWith("%PDF-1.4"), true);
   assert.equal(text.trimEnd().endsWith("%%EOF"), true);
-  assert.match(text, /Hood: 1 - 5 dime dents - \$80/);
-  assert.match(text, /Grand total: \$80/);
-  assert.match(text, /repair estimate only/);
+  assert.match(text, /WWW\.NTXHAIL\.COM/);
+  assert.match(text, /Preliminary Estimate/);
+  assert.match(text, /Dakine Investments LLC DBA NTX Hail/);
+  assert.match(text, /Federal ID 84-5170282/);
+  assert.match(text, /904 S Woodrow/);
+  assert.match(text, /Note: PDR 5 dime/);
+  assert.match(text, /ESTIMATE TOTALS/);
+  assert.match(text, /VEHICLE/);
+  assert.match(text, /Grand Total/);
+  assert.match(text, /80\.00/);
+  assert.match(text, /Page 1 of /);
+  assert.equal(text.includes("repair estimate only"), false);
   assert.equal(/waive your deductible/i.test(text), false);
   assert.equal(text.includes("startxref"), true);
 });
 
-test("exact dent counts pick the matrix range and use carrier wording", () => {
-  const quote = quotePanel({
+test("one dent size and count price the matrix and read like a PDR line", () => {
+  const quarter = quotePanel({ panel: "HOOD", carrierId: "state_farm", size: "QUARTER", count: 35 });
+  assert.equal(quarter.selectedRange, "31 - 50");
+  assert.equal(quarter.size, "QUARTER");
+  assert.equal(quarter.basePrice, 425);
+  assert.equal(formatPanelLine("HOOD", { size: "QUARTER", count: 35, totalPrice: 425 }), "Hood: PDR 35 quarter — $425");
+  const dime = quotePanel({ panel: "HOOD", carrierId: "state_farm", size: "DIME", count: 1 });
+  assert.equal(dime.selectedRange, "1 - 5");
+  assert.equal(dime.basePrice, 80);
+  const legacy = quotePanel({
     panel: "HOOD",
     carrierId: "state_farm",
     sizeCounts: { DIME: 12, NICKEL: 0, QUARTER: 6, HALF: 3 },
   });
-  assert.equal(quote.count, 21);
-  assert.equal(quote.selectedRange, "16 - 30");
-  assert.equal(quote.size, "HALF");
-  assert.equal(quote.basePrice, 350);
-  const single = quotePanel({
-    panel: "HOOD",
-    carrierId: "state_farm",
-    sizeCounts: { DIME: 3, NICKEL: 0, QUARTER: 0, HALF: 0 },
-  });
-  assert.equal(single.selectedRange, "1 - 5");
-  assert.equal(single.basePrice, 80);
+  assert.equal(legacy.size, "DIME");
+  assert.equal(legacy.count, 12);
+  assert.equal(legacy.selectedRange, "6 - 15");
+  assert.equal(legacy.basePrice, 125);
   const line = formatPanelLine("HOOD", {
     sizeCounts: { DIME: 12, NICKEL: 0, QUARTER: 6, HALF: 3 },
-    totalPrice: 350,
+    totalPrice: 125,
   });
-  assert.equal(line, "Hood: 12 Dime, 6 Quarter, 3 Half Dollar — 21 total — $350");
+  assert.equal(line, "Hood: PDR 12 dime — $125");
   const summary = buildEstimateSummary({
     vehicleInfo: { year: "2020", make: "Toyota", model: "Camry" },
-    panelData: {
-      HOOD: { sizeCounts: { DIME: 12, NICKEL: 0, QUARTER: 6, HALF: 3 }, totalPrice: 350 },
-    },
+    panelData: { HOOD: { size: "QUARTER", count: 35, totalPrice: 425 } },
     carrierLabel: "State Farm",
-    grandTotal: 350,
+    grandTotal: 425,
     photos: [{ id: "p1", tab: "panels", tileId: "hood", tabLabel: "Panels", tileLabel: "Hood", kind: "image", thumb: "data:image/jpeg;base64,a", note: "edge" }],
+    packetUrl: "https://ntxhail.github.io/scope/?packet=abc",
   });
-  assert.match(summary, /Hood: 12 Dime, 6 Quarter, 3 Half Dollar — 21 total — \$350/);
-  assert.match(summary, /Vehicle dent totals: 12 Dime, 6 Quarter, 3 Half Dollar — 21 total/);
-  assert.match(summary, /Photos on phone: 1/);
-  assert.equal(vehicleSizeTotals({ HOOD: { sizeCounts: { DIME: 1 } } }).text.includes("1 Dime"), true);
+  assert.match(summary, /Hood: PDR 35 quarter — \$425/);
+  assert.match(summary, /Vehicle dent totals: 35 quarter/);
+  assert.match(summary, /Photos and PDF: https:\/\/ntxhail\.github\.io\/scope\/\?packet=abc/);
+  assert.equal(summary.includes("repair estimate only"), false);
+  assert.equal(vehicleSizeTotals({ HOOD: { size: "DIME", count: 1 } }).text, "Vehicle dent totals: 1 dime");
   const over = quotePanel({
     panel: "HOOD",
     carrierId: "state_farm",
-    sizeCounts: { DIME: 0, NICKEL: 0, QUARTER: 0, HALF: 0 },
+    size: "DIME",
+    count: 0,
     addons: ["Oversized Dent"],
     osDentCount: 2,
   });
   assert.equal(over.totalPrice, 100);
+  const hss = quotePanel({
+    panel: "LFF",
+    carrierId: "state_farm",
+    size: "QUARTER",
+    count: 35,
+    addons: ["HSS", "Oversized Dent"],
+    osDentCount: 2,
+  });
+  assert.ok(hss.basePrice > 0);
+  assert.equal(formatPanelLine("LFF", { size: "QUARTER", count: 35, osDentCount: 2, addons: ["HSS"], totalPrice: hss.totalPrice }).includes("PDR 35 quarter"), true);
 });
 
 test("a queued scope is marked sent only after the form has loaded", () => {
@@ -302,6 +325,7 @@ test("a queued scope is marked sent only after the form has loaded", () => {
   assert.equal(queued.syncStatus, "queued");
   assert.equal(queued.lead.name, "Ada");
   assert.equal(confirmScopeSent(queued, { frameLoaded: false }).ok, false);
+  assert.equal(confirmScopeSent(queued, { frameLoaded: true, uploadsReady: false }).ok, false);
   const sent = confirmScopeSent(queued, { frameLoaded: true }, new Date("2026-10-22T01:00:00Z"));
   assert.equal(sent.ok, true);
   assert.equal(sent.scope.syncStatus, "sent");
@@ -340,15 +364,16 @@ test("the export zip keeps the estimate and grouped photos", () => {
 });
 
 test("the page and source do not show a phone number or a login gate", () => {
-  const files = ["index.html", "src/app.jsx", "src/config.js", "src/hail-logic.js", "src/media-screen.jsx", "src/media-catalog.js", "src/idb.js", "src/compress.js", "sw.js"];
+  const files = ["index.html", "src/app.jsx", "src/config.js", "src/hail-logic.js", "src/media-screen.jsx", "src/media-catalog.js", "src/idb.js", "src/compress.js", "src/ccc-pdf.js", "src/packet-store.js", "src/download-page.jsx", "src/wheel-picker.jsx", "sw.js"];
   const phone = /(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}/;
-  const banned = [/sign in/i, /create account/i, /supabase/i, /deductible waived/i, /cash rebate/i, /waive your deductible/i];
+  const banned = [/sign in/i, /create account/i, /deductible waived/i, /cash rebate/i, /waive your deductible/i, /service_role/i, /sb_secret/i];
   for (const file of files) {
     const text = fs.readFileSync(file, "utf8");
     assert.equal(phone.test(text), false, file);
     for (const pattern of banned) assert.equal(pattern.test(text), false, `${file} ${pattern}`);
     assert.equal(text.includes("forms/submit"), false, file);
     assert.equal(text.includes("backend.leadconnectorhq.com"), false, file);
+    assert.equal(text.includes("repair estimate only"), false, file);
   }
   const page = fs.readFileSync("index.html", "utf8");
   assert.equal(page.includes("app.js"), true);
