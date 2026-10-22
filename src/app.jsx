@@ -8,10 +8,14 @@ import {
   buildEstimateSummary, ESTIMATE_DISCLAIMER, validateLead, parseGhlForm,
   buildGhlEmbedUrl, reportDocument, buildEstimatePdf, estimatePdfName,
   blankVehicle, estimateHasWork, createEstimateId, parseDraft, parseSavedEstimates,
-  archiveEstimate, openSavedEstimate, estimateTitle,
+  estimateTitle, normalizeEstimate, formatPanelDamage, formatSizeList, vehicleSizeTotals,
+  panelDentTotal, totalSizeCount, syncStatusLabel, queueForSync, confirmScopeSent,
+  pruneScopes, buildZip, buildPacketHtml, mediaExportPath, groupPhotosForReport,
   DRAFT_STORAGE_KEY, SAVED_STORAGE_KEY,
 } from "./hail-logic.js";
 import { GHL_FORM, GHL_SUMMARY_FIELD_ID } from "./config.js";
+import { deleteScope, loadScopes, readMeta, saveMeta, saveScope } from "./idb.js";
+import { MediaScreen } from "./media-screen.jsx";
 
 const PANEL_SHORT = {
   HOOD: "Hood", ROOF: "Roof", TRUNK: "Trunk",
@@ -38,10 +42,10 @@ function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
   };
 
   const getHeat = (panel) => {
-    const d = panelData[panel];
-    if (!d || !d.count || d.count <= 0) return 0;
+    const dents = panelDentTotal(panelData[panel]);
+    if (!dents) return 0;
     const max = getMaxCount(panel);
-    return Math.min(d.count / (max || 50), 1);
+    return Math.min(dents / (max || 50), 1);
   };
 
   const getColor = (panel) => {
@@ -64,7 +68,8 @@ function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
       <path d="M155,375 L265,375 L268,390 L152,390 Z" fill="rgba(219,234,254,0.6)" stroke="#bfdbfe" strokeWidth="1" />
       {Object.entries(panelPaths).map(([key, { d, cx, cy }]) => {
         const isSelected = selectedPanel === key;
-        const hasData = panelData[key] && (panelData[key].count > 0 || panelData[key].rrEnabled || panelData[key].convEnabled);
+        const dents = panelDentTotal(panelData[key]);
+        const hasData = panelData[key] && (dents > 0 || panelData[key].rrEnabled || panelData[key].convEnabled);
         const short = PANEL_SHORT[key] || key;
         const words = short.split(" ");
         const choose = () => onSelectPanel(key);
@@ -87,7 +92,7 @@ function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
                   fill={panelData[key].rrEnabled ? "#ef4444" : panelData[key].convEnabled ? "#f97316" : "#ffffff"}
                   fontSize={panelData[key].rrEnabled ? "8" : panelData[key].convEnabled ? "7" : "11"}
                   fontWeight="700" fontFamily="monospace" style={{ pointerEvents: "none" }}>
-                  {panelData[key].rrEnabled ? "R&R" : panelData[key].convEnabled ? "CONV" : panelData[key].count}
+                  {panelData[key].rrEnabled ? "R&R" : panelData[key].convEnabled ? "CONV" : dents}
                 </text>
               </>
             )}
@@ -106,9 +111,46 @@ function CarSilhouette({ panelData, selectedPanel, onSelectPanel }) {
 }
 
 
+function countsFromPanel(data) {
+  const counts = { DIME: 0, NICKEL: 0, QUARTER: 0, HALF: 0 };
+  if (data?.sizeCounts) {
+    for (const size of DENT_SIZES) counts[size] = Math.max(0, Math.min(999, Math.round(Number(data.sizeCounts[size]) || 0)));
+    return counts;
+  }
+  if (data?.size && Object.prototype.hasOwnProperty.call(counts, data.size)) {
+    counts[data.size] = Math.max(0, Math.min(999, Math.round(Number(data.count) || 0)));
+  }
+  return counts;
+}
+
+function CountStepper({ label, value, onChange }) {
+  return (
+    <div style={styles.countRow}>
+      <span style={styles.countLabel}>{label}</span>
+      <div style={styles.osStepper}>
+        <button type="button" aria-label={`Decrease ${label}`} style={styles.osStepBtn} onClick={() => onChange(Math.max(0, value - 1))}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <input
+          aria-label={`${label} count`}
+          inputMode="numeric"
+          value={String(value)}
+          onChange={(event) => {
+            const digits = event.target.value.replace(/\D/g, "").slice(0, 3);
+            onChange(digits === "" ? 0 : Number(digits));
+          }}
+          style={styles.countInput}
+        />
+        <button type="button" aria-label={`Increase ${label}`} style={styles.osStepBtn} onClick={() => onChange(Math.min(999, value + 1))}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
-  const [selectedRange, setSelectedRange] = useState(data?.selectedRange || null);
-  const [size, setSize] = useState(data?.size || "DIME");
+  const [counts, setCounts] = useState(() => countsFromPanel(data));
   const [addons, setAddons] = useState(data?.addons || []);
   const [osDentCount, setOsDentCount] = useState(data?.osDentCount || 0);
   const [doubleOsCount, setDoubleOsCount] = useState(data?.doubleOsCount || 0);
@@ -146,17 +188,19 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
   const toggleRiOp = (id) => setRiIncluded(prev => ({ ...prev, [id]: !prev[id] }));
   const toggleRiRr = (id) => setRiRr(prev => ({ ...prev, [id]: !prev[id] }));
 
+  const pricedAddons = [
+    ...addons.filter((name) => name !== "Oversized Dent" && name !== "Double OS Dents"),
+    ...(osDentCount > 0 ? ["Oversized Dent"] : []),
+    ...(doubleOsCount > 0 ? ["Double OS Dents"] : []),
+  ];
   const quote = quotePanel({
-    panel, carrierId, selectedRange, size, addons, osDentCount, doubleOsCount,
+    panel, carrierId, sizeCounts: counts, addons: pricedAddons, osDentCount, doubleOsCount,
     rrEnabled, rrHours, convEnabled, convHours, riEnabled, laborRate, riTimes, riIncluded,
   });
-  const rows = quote.rows;
-  const availableRanges = rows;
-  const selectedRangeIdx = selectedRange ? availableRanges.findIndex(r => r.range === selectedRange) : -1;
   const toggleAddon = (name) => setAddons(prev => prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]);
-  const selectedRow = quote.selectedRow;
   const basePrice = quote.basePrice;
-  const count = quote.count;
+  const countLine = formatSizeList(counts, osDentCount, doubleOsCount);
+  const matrixCount = totalSizeCount(counts);
   const addonBreakdown = quote.addonBreakdown;
   const addonTotal = quote.addonTotal;
   const nonPdr = quote.nonPdr;
@@ -165,6 +209,9 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
   const riTotalHours = quote.riTotalHours;
   const riTotalCost = quote.riTotalCost;
   const totalPrice = quote.totalPrice;
+  const blocked = !nonPdr && matrixCount > 0 && quote.rows.length > 0 && basePrice <= 0;
+  const emptyPdr = !nonPdr && matrixCount <= 0 && osDentCount <= 0 && doubleOsCount <= 0;
+  const setCount = (size, value) => setCounts((prev) => ({ ...prev, [size]: value }));
 
   const S = styles;
 
@@ -174,7 +221,7 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
         <div style={S.modalHeader}>
           <div>
             <div style={S.modalTitle}>{PANEL_LABELS[panel]}</div>
-            <div style={S.modalSubtitle}>{panel} • {availableRanges.length} damage ranges</div>
+            <div style={S.modalSubtitle}>{PANEL_LABELS[panel] || panel} · exact counts</div>
           </div>
           <button onClick={onClose} style={S.closeBtn}>✕</button>
         </div>
@@ -201,84 +248,21 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
 
           {!nonPdr && (
             <>
-              <label style={S.fieldLabel}>DENT COUNT RANGE</label>
-              <div style={S.rangeNavRow}>
-                <button style={{ ...S.rangeArrow, opacity: selectedRangeIdx > 0 ? 1 : 0.25 }}
-                  onClick={() => { if (selectedRangeIdx > 0) setSelectedRange(availableRanges[selectedRangeIdx - 1].range); }}
-                  disabled={selectedRangeIdx <= 0}>
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
-                </button>
-                <div style={{ ...S.rangeDisplay, ...(selectedRow && selectedRow[size] === 0 ? S.rangeDisplayInvalid : {}) }}>
-                  {selectedRange ? (
-                    <>
-                      <div style={{ ...S.rangeDisplayCount, ...(selectedRow && selectedRow[size] === 0 ? { color: "#ef4444" } : {}) }}>{selectedRange}</div>
-                      <div style={{ ...S.rangeDisplayLabel, ...(selectedRow && selectedRow[size] === 0 ? { color: "#b91c1c" } : {}) }}>dents</div>
-                    </>
-                  ) : (
-                    <div style={S.rangeDisplayPlaceholder}>Select range</div>
-                  )}
-                </div>
-                <button style={{ ...S.rangeArrow, opacity: selectedRangeIdx < availableRanges.length - 1 ? 1 : 0.25 }}
-                  onClick={() => { if (selectedRangeIdx < availableRanges.length - 1) setSelectedRange(availableRanges[selectedRangeIdx + 1].range); }}
-                  disabled={selectedRangeIdx >= availableRanges.length - 1}>
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="9 18 15 12 9 6"/></svg>
-                </button>
-              </div>
-              <div style={S.rangeSteps}>
-                {availableRanges.map((r, i) => {
-                  const isActive = selectedRange === r.range;
-                  const isPast = i < selectedRangeIdx;
-                  const isInvalid = r[size] === 0;
-                  return (
-                    <button key={r.range} type="button" aria-label={`${r.range} dents`} onClick={() => setSelectedRange(r.range)}
-                      style={{ ...S.rangeStep, ...(isActive ? S.rangeStepActive : {}), ...(isPast && !isInvalid ? S.rangeStepPast : {}) }}>
-                      <div style={{
-                        ...S.rangeStepDot,
-                        ...(isActive && !isInvalid ? { background: "#2563eb", borderColor: "#2563eb", boxShadow: "0 0 8px rgba(37,99,235,0.5)", transform: "scale(1.3)" } : {}),
-                        ...(isActive && isInvalid ? { background: "#ef4444", borderColor: "#ef4444", boxShadow: "0 0 8px rgba(239,68,68,0.5)", transform: "scale(1.3)" } : {}),
-                        ...(isPast && !isInvalid ? { background: "rgba(37,99,235,0.4)", borderColor: "rgba(37,99,235,0.5)" } : {}),
-                        ...(isInvalid && !isActive ? { background: "rgba(239,68,68,0.3)", borderColor: "rgba(239,68,68,0.4)" } : {}),
-                      }} />
-                      {i < availableRanges.length - 1 && (
-                        <div style={{ position: "absolute", top: 9, left: "55%", right: "-45%", height: 2,
-                          background: isPast ? "rgba(37,99,235,0.35)" : "rgba(148,163,184,0.15)", zIndex: 0 }} />
-                      )}
-                      <div style={{ ...S.rangeStepText,
-                        ...(isActive && !isInvalid ? { color: "#3b82f6" } : {}),
-                        ...(isActive && isInvalid ? { color: "#ef4444" } : {}),
-                        ...(isInvalid && !isActive ? { color: "#ef4444", opacity: 0.6 } : {}),
-                      }}>{r.range}</div>
-                    </button>
-                  );
-                })}
-              </div>
+              <label style={S.fieldLabel}>DENT COUNTS</label>
+              {DENT_SIZES.map((size) => (
+                <CountStepper key={size} label={DENT_SIZE_LABELS[size]} value={counts[size] || 0} onChange={(value) => setCount(size, value)} />
+              ))}
+              <CountStepper label="Oversize" value={osDentCount} onChange={setOsDentCount} />
+              <CountStepper label="Double OS" value={doubleOsCount} onChange={setDoubleOsCount} />
+              {countLine.text && <div style={S.priceTag}>{countLine.text}</div>}
+              {matrixCount > 0 && quote.selectedRange && basePrice > 0 && (
+                <div style={S.priceTag}>Range {quote.selectedRange} · priced as {DENT_SIZE_LABELS[quote.size]} · ${basePrice.toLocaleString()}</div>
+              )}
+              {matrixCount > 0 && !quote.selectedRange && (
+                <div style={S.priceTag}>Outside the price matrix</div>
+              )}
 
-              <label style={{ ...S.fieldLabel, marginTop: 22 }}>DENT SIZE</label>
-              <div style={S.sizeGrid}>
-                {DENT_SIZES.map(s => {
-                  const hasAnyPrice = rows.some(r => r[s] > 0);
-                  const isAvailable = selectedRow ? selectedRow[s] > 0 : hasAnyPrice;
-                  const priceForSize = selectedRow ? selectedRow[s] : 0;
-                  const isSelectedInvalid = size === s && selectedRow && selectedRow[s] === 0;
-                  return (
-                    <button key={s} onClick={() => hasAnyPrice && setSize(s)}
-                      style={{
-                        ...S.sizeBtn,
-                        ...(size === s && isAvailable ? S.sizeBtnActive : {}),
-                        ...(isSelectedInvalid ? S.sizeBtnRed : {}),
-                        ...(!hasAnyPrice ? S.sizeBtnDisabled : {}),
-                        ...(!isAvailable && hasAnyPrice && size !== s ? S.sizeBtnWarn : {}),
-                      }}>
-                      <div>{DENT_SIZE_LABELS[s]}</div>
-                      {selectedRow && isAvailable && <div style={{ fontSize: 11, marginTop: 2, opacity: 0.7 }}>${priceForSize}</div>}
-                      {selectedRow && !isAvailable && <div style={{ fontSize: 9, marginTop: 2, color: "#ef4444", fontWeight: 600 }}>R&R</div>}
-                      {!selectedRow && !hasAnyPrice && <div style={{ fontSize: 10, marginTop: 2, opacity: 0.5 }}>N/A</div>}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {selectedRange && basePrice === 0 && selectedRow && (
+              {blocked && (
                 <div style={S.rrWarning}>
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round">
                     <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
@@ -286,43 +270,24 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
                   </svg>
                   <div>
                     <div style={S.rrWarningTitle}>Conventional or R&R Recommended</div>
-                    <div style={S.rrWarningText}>Exceeds PDR matrix for this panel at this size.</div>
+                    <div style={S.rrWarningText}>The largest dent size is outside the PDR matrix for this count.</div>
                   </div>
                 </div>
               )}
 
-              {selectedRange && basePrice > 0 && <div style={S.priceTag}>Base: ${basePrice.toLocaleString()}</div>}
-
               <label style={S.fieldLabel}>ADD-ONS</label>
               <div style={S.addonGrid}>
-                {ADDONS.map(a => {
+                {ADDONS.filter((addon) => addon.name !== "Oversized Dent" && addon.name !== "Double OS Dents").map(a => {
                   const isActive = addons.includes(a.name);
-                  const isDollarQty = a.name === "Oversized Dent" || a.name === "Double OS Dents";
-                  const showStepper = isDollarQty && isActive;
                   return (
                     <div key={a.name} style={{ marginBottom: 6 }}>
-                      <button onClick={() => toggleAddon(a.name)}
+                      <button type="button" onClick={() => toggleAddon(a.name)}
                         style={{ ...S.addonBtn, ...(isActive ? S.addonBtnActive : {}) }}>
                         <span style={S.addonName}>{a.name}</span>
                         <span style={{ ...S.addonVal, ...(isActive ? S.addonValActive : {}) }}>
                           {a.type === "dollar" ? `$${a.value}/ea` : `+${(a.value * 100)}%`}
                         </span>
                       </button>
-                      {showStepper && (
-                        <div style={S.osDentRow}>
-                          <span style={S.osDentLabel}>{a.name === "Oversized Dent" ? "OS Dents" : "Dbl OS"} Qty:</span>
-                          <div style={S.osStepper}>
-                            <button style={S.osStepBtn} onClick={e => { e.stopPropagation(); if (a.name === "Oversized Dent") setOsDentCount(c => Math.max(0, c-1)); else setDoubleOsCount(c => Math.max(0, c-1)); }}>
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                            </button>
-                            <div style={S.osStepValue}>{a.name === "Oversized Dent" ? osDentCount : doubleOsCount}</div>
-                            <button style={S.osStepBtn} onClick={e => { e.stopPropagation(); if (a.name === "Oversized Dent") setOsDentCount(c => c+1); else setDoubleOsCount(c => c+1); }}>
-                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                            </button>
-                          </div>
-                          <span style={S.osStepTotal}>${((a.name === "Oversized Dent" ? osDentCount : doubleOsCount) * a.value).toLocaleString()}</span>
-                        </div>
-                      )}
                     </div>
                   );
                 })}
@@ -484,9 +449,10 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
           )}
 
           {/* Summary */}
-          {((selectedRange && basePrice > 0 && !nonPdr) || (nonPdr && (rrCost > 0 || convCost > 0 || (riEnabled && riTotalCost > 0)))) && (
+          {((!nonPdr && (basePrice > 0 || totalPrice > 0)) || (nonPdr && (rrCost > 0 || convCost > 0 || (riEnabled && riTotalCost > 0) || matrixCount > 0))) && (
             <div style={S.summaryBox}>
-              {!nonPdr && <div style={S.summaryRow}><span>Base ({selectedRange} {DENT_SIZE_LABELS[size].toLowerCase()} dents)</span><span>${basePrice.toLocaleString()}</span></div>}
+              {!nonPdr && countLine.text && <div style={S.summaryRow}><span>{countLine.text}</span><span></span></div>}
+              {!nonPdr && basePrice > 0 && <div style={S.summaryRow}><span>Base ({quote.selectedRange} {DENT_SIZE_LABELS[quote.size]})</span><span>${basePrice.toLocaleString()}</span></div>}
               {!nonPdr && addonBreakdown.filter(a => a.amount > 0).map(a => (
                 <div key={a.name} style={S.summaryRow}><span>{a.name}</span><span>+${a.amount.toLocaleString()}</span></div>
               ))}
@@ -499,70 +465,49 @@ function PanelEditor({ panel, data, onSave, onClose, onDelete, carrierId }) {
         </div>
 
         <div style={S.modalFooter}>
-          {data && (data.count > 0 || data.rrEnabled || data.convEnabled) && (
-            <button onClick={() => { onDelete(panel); onClose(); }} style={S.deleteBtn}>Remove</button>
+          {data && (panelDentTotal(data) > 0 || data.rrEnabled || data.convEnabled || Number(data.osDentCount) > 0) && (
+            <button type="button" onClick={() => { onDelete(panel); onClose(); }} style={S.deleteBtn}>Remove</button>
           )}
           <button
-            onClick={() => { onSave(panel, { count: nonPdr ? 0 : count, selectedRange: nonPdr ? null : selectedRange, size, addons: nonPdr ? [] : addons, osDentCount, doubleOsCount, rrEnabled, rrHours, rrCost, convEnabled, convHours, convCost, basePrice: nonPdr ? 0 : basePrice, addonTotal: nonPdr ? 0 : addonTotal, riEnabled, laborRate, riTimes, riIncluded, riRr, riTotalHours, riTotalCost, totalPrice }); onClose(); }}
-            style={S.saveBtn}
-            disabled={!nonPdr && (!selectedRange || basePrice <= 0)}>
-            {rrEnabled ? (totalPrice > 0 ? `Save R&R — $${totalPrice.toLocaleString()}` : "Save R&R")
+            type="button"
+            onClick={() => {
+              onSave(panel, {
+                count: matrixCount,
+                sizeCounts: counts,
+                selectedRange: nonPdr ? null : quote.selectedRange,
+                size: quote.size,
+                addons: nonPdr ? [] : pricedAddons,
+                osDentCount,
+                doubleOsCount,
+                rrEnabled,
+                rrHours,
+                rrCost,
+                convEnabled,
+                convHours,
+                convCost,
+                basePrice: nonPdr ? 0 : basePrice,
+                addonTotal: nonPdr ? 0 : addonTotal,
+                riEnabled,
+                laborRate,
+                riTimes,
+                riIncluded,
+                riRr,
+                riTotalHours,
+                riTotalCost,
+                totalPrice,
+              });
+              onClose();
+            }}
+            style={{ ...S.saveBtn, opacity: blocked || emptyPdr ? 0.45 : 1 }}
+            disabled={blocked || emptyPdr}>
+            {blocked ? "Use R&R or conventional"
+              : emptyPdr ? "Enter dent counts"
+              : rrEnabled ? (totalPrice > 0 ? `Save R&R — $${totalPrice.toLocaleString()}` : "Save R&R")
               : convEnabled ? (totalPrice > 0 ? `Save Conv. — $${totalPrice.toLocaleString()}` : "Save Conv.")
-              : !selectedRange ? "Select a damage range"
-              : basePrice <= 0 ? "Select a valid size"
               : `Save — $${totalPrice.toLocaleString()}`}
           </button>
         </div>
       </div>
-    </div>
-  );
-}
-
-
-function CameraCapture({ photos, setPhotos }) {
-  const cameraRef = useRef(null);
-  const galleryRef = useRef(null);
-  const handleCapture = (e) => {
-    const files = Array.from(e.target.files);
-    files.forEach(file => {
-      const reader = new FileReader();
-      reader.onload = (ev) => setPhotos(prev => [...prev, { url: ev.target.result, name: file.name, date: new Date().toLocaleString() }]);
-      reader.readAsDataURL(file);
-    });
-    e.target.value = "";
-  };
-  return (
-    <div>
-      {/* Camera input — opens device camera directly */}
-      <input ref={cameraRef} type="file" accept="image/*" capture="environment" onChange={handleCapture} style={{ display: "none" }} />
-      {/* Gallery input — opens photo library for multi-select */}
-      <input ref={galleryRef} type="file" accept="image/*" multiple onChange={handleCapture} style={{ display: "none" }} />
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={() => cameraRef.current.click()} style={{ ...styles.cameraBtn, flex: 1 }}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/>
-            <circle cx="12" cy="13" r="4"/>
-          </svg>
-          <span>Camera</span>
-        </button>
-        <button onClick={() => galleryRef.current.click()} style={{ ...styles.cameraBtn, flex: 1 }}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
-            <polyline points="21 15 16 10 5 21"/>
-          </svg>
-          <span>Gallery</span>
-        </button>
-      </div>
-      {photos.length > 0 && (
-        <div style={styles.photoStrip}>
-          {photos.map((p, i) => (
-            <div key={i} style={styles.photoThumb}>
-              <img src={p.url} alt={p.name} style={styles.photoImg} />
-              <button onClick={() => setPhotos(prev => prev.filter((_, j) => j !== i))} style={styles.photoRemove}>✕</button>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -658,28 +603,18 @@ function VehicleForm({ vehicleInfo, setVehicleInfo, onClose }) {
 
 const EMPTY_VEHICLE = blankVehicle();
 
-function LeadCapture({ summary, onFormClosed }) {
+function LeadCapture({ summary, onQueue }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [notes, setNotes] = useState("");
   const [errors, setErrors] = useState({});
-  const [embedUrl, setEmbedUrl] = useState("");
   const configured = Boolean(parseGhlForm(GHL_FORM).formId);
-
-  useEffect(() => {
-    if (!embedUrl) return undefined;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  }, [embedUrl]);
 
   const handleSubmit = (event) => {
     event.preventDefault();
-    const lead = { name, phone, email, notes };
-    const nextErrors = validateLead(lead);
+    const nextLead = { name, phone, email, notes };
+    const nextErrors = validateLead(nextLead);
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length) return;
     if (!configured) {
@@ -688,7 +623,7 @@ function LeadCapture({ summary, onFormClosed }) {
     }
     const url = buildGhlEmbedUrl({
       formValue: GHL_FORM,
-      lead,
+      lead: nextLead,
       summary,
       summaryFieldId: GHL_SUMMARY_FIELD_ID,
     });
@@ -696,48 +631,34 @@ function LeadCapture({ summary, onFormClosed }) {
       setErrors({ form: "Could not open the form. Download the estimate and try again." });
       return;
     }
-    setEmbedUrl(url);
+    onQueue(nextLead);
   };
 
   const S = styles;
   return (
-    <>
-      <form onSubmit={handleSubmit} style={S.leadCard}>
-        <div style={S.sectionLabel}>Send this estimate</div>
-        <p style={S.leadIntro}>Name and phone so NTX Hail can follow up. Email is optional. The estimate above is included. On the next screen, check the consent boxes and submit the form. No account needed.</p>
-        <label style={S.leadLabel}>Name
-          <input value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" style={S.leadInput} />
-        </label>
-        {errors.name && <div style={S.leadError}>{errors.name}</div>}
-        <label style={S.leadLabel}>Phone
-          <input value={phone} onChange={(e) => setPhone(e.target.value)} autoComplete="tel" inputMode="tel" type="tel" style={S.leadInput} />
-        </label>
-        {errors.phone && <div style={S.leadError}>{errors.phone}</div>}
-        <label style={S.leadLabel}>Email <span style={S.optional}>(optional)</span>
-          <input value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" type="email" style={S.leadInput} />
-        </label>
-        {errors.email && <div style={S.leadError}>{errors.email}</div>}
-        <label style={S.leadLabel}>Notes <span style={S.optional}>(optional)</span>
-          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} style={{ ...S.leadInput, minHeight: 88, resize: "vertical" }} />
-        </label>
-        <div style={S.summaryPreview}>{summary}</div>
-        <button type="submit" style={{ ...S.saveBtn, width: "100%", minHeight: 48 }}>Send to NTX Hail</button>
-        {errors.form && <div style={S.leadError}>{errors.form}</div>}
-        <p style={S.disclaimer}>{ESTIMATE_DISCLAIMER}</p>
-      </form>
-      {embedUrl && (
-        <div style={S.ghlOverlay} role="dialog" aria-modal="true" aria-label="NTX Hail estimate form">
-          <div style={S.ghlBar}>
-            <div style={{ minWidth: 0 }}>
-              <div style={S.ghlTitle}>Send to NTX Hail</div>
-              <p style={S.ghlHint}>Check the consent boxes, then submit the form.</p>
-            </div>
-            <button type="button" onClick={() => { setEmbedUrl(""); onFormClosed?.(); }} style={S.ghlClose}>Close</button>
-          </div>
-          <iframe title="NTX Hail estimate form" src={embedUrl} style={S.ghlFrame} />
-        </div>
-      )}
-    </>
+    <form onSubmit={handleSubmit} style={S.leadCard}>
+      <div style={S.sectionLabel}>Send this estimate</div>
+      <p style={S.leadIntro}>Name and phone so NTX Hail can follow up. Email is optional. The estimate above is included. On the next screen, check the consent boxes and submit the form. Photos stay on this phone until you use Share / Export.</p>
+      <label style={S.leadLabel}>Name
+        <input value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" style={S.leadInput} />
+      </label>
+      {errors.name && <div style={S.leadError}>{errors.name}</div>}
+      <label style={S.leadLabel}>Phone
+        <input value={phone} onChange={(e) => setPhone(e.target.value)} autoComplete="tel" inputMode="tel" type="tel" style={S.leadInput} />
+      </label>
+      {errors.phone && <div style={S.leadError}>{errors.phone}</div>}
+      <label style={S.leadLabel}>Email <span style={S.optional}>(optional)</span>
+        <input value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" type="email" style={S.leadInput} />
+      </label>
+      {errors.email && <div style={S.leadError}>{errors.email}</div>}
+      <label style={S.leadLabel}>Notes <span style={S.optional}>(optional)</span>
+        <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} style={{ ...S.leadInput, minHeight: 88, resize: "vertical" }} />
+      </label>
+      <div style={S.summaryPreview}>{summary}</div>
+      <button type="submit" style={{ ...S.saveBtn, width: "100%", minHeight: 48 }}>Send to NTX Hail</button>
+      {errors.form && <div style={S.leadError}>{errors.form}</div>}
+      <p style={S.disclaimer}>{ESTIMATE_DISCLAIMER}</p>
+    </form>
   );
 }
 
@@ -750,68 +671,136 @@ function HailEstimator() {
   const [showVehicleForm, setShowVehicleForm] = useState(false);
   const [emailTo, setEmailTo] = useState("");
   const [showEmailDone, setShowEmailDone] = useState(false);
-  const [zipLoading, setZipLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [saveStatus, setSaveStatus] = useState("idle");
   const [carrierId, setCarrierId] = useState("state_farm");
   const [estimateId, setEstimateId] = useState("");
-  const [savedEstimates, setSavedEstimates] = useState([]);
+  const [createdAt, setCreatedAt] = useState("");
+  const [library, setLibrary] = useState([]);
   const [showSaved, setShowSaved] = useState(false);
   const [exportNote, setExportNote] = useState("");
-  const [finishedNote, setFinishedNote] = useState("");
-  const draftRef = useRef(null);
+  const [syncMessage, setSyncMessage] = useState("");
+  const [syncStatus, setSyncStatus] = useState("local");
+  const [lead, setLead] = useState(null);
+  const [queuedAt, setQueuedAt] = useState("");
+  const [sentAt, setSentAt] = useState("");
+  const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
+  const [embedUrl, setEmbedUrl] = useState("");
+  const [frameReady, setFrameReady] = useState(false);
+  const [syncingId, setSyncingId] = useState("");
+  const [installEvent, setInstallEvent] = useState(null);
+  const [showInstall, setShowInstall] = useState(false);
+  const attemptedRef = useRef(new Set());
+  const scopeRef = useRef(null);
+  const writeQueue = useRef(Promise.resolve());
   const activeCarrier = CARRIERS.find((c) => c.id === carrierId) || CARRIERS[0];
-  draftRef.current = estimateId
-    ? { id: estimateId, updatedAt: new Date().toISOString(), vehicleInfo, panelData, carrierId, photos }
-    : null;
+  const rememberScope = (scope) => {
+    setEstimateId(scope.id);
+    setCreatedAt(scope.createdAt || "");
+    setVehicleInfo(scope.vehicleInfo);
+    setPanelData(scope.panelData);
+    setCarrierId(scope.carrierId);
+    setPhotos(scope.photos);
+    setSyncStatus(scope.syncStatus || "local");
+    setLead(scope.lead || null);
+    setQueuedAt(scope.queuedAt || "");
+    setSentAt(scope.sentAt || "");
+  };
+  scopeRef.current = estimateId ? {
+    id: estimateId,
+    createdAt: createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    vehicleInfo,
+    panelData,
+    carrierId,
+    photos,
+    syncStatus,
+    lead,
+    queuedAt,
+    sentAt,
+  } : null;
 
-  const persistDraft = useCallback((draft) => {
-    if (!draft?.id) return;
-    const write = (value) => localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(value));
-    try {
-      write(draft);
-      setSaveStatus("saved");
-    } catch (err) {
-      try {
-        write({ ...draft, photos: [] });
+  const persistScope = useCallback((scope) => {
+    writeQueue.current = writeQueue.current
+      .catch(() => {})
+      .then(async () => {
+        await saveScope(scope);
+        setLibrary((list) => {
+          const merged = list.some((item) => item.id === scope.id)
+            ? list.map((item) => (item.id === scope.id ? scope : item))
+            : [scope, ...list];
+          const pruned = pruneScopes(merged, scope.id);
+          const keep = new Set(pruned.map((item) => item.id));
+          for (const item of merged) {
+            if (!keep.has(item.id)) deleteScope(item.id).catch(() => {});
+          }
+          return pruned;
+        });
         setSaveStatus("saved");
-      } catch (again) {
-        console.error("[HailSpec] Could not save the draft", again);
+      })
+      .catch((err) => {
+        console.error("[HailSpec] Could not save the scope", err);
         setSaveStatus("error");
-      }
-    }
+      });
+    return writeQueue.current;
   }, []);
 
   useEffect(() => {
-    try {
-      const draft = parseDraft(localStorage.getItem(DRAFT_STORAGE_KEY));
-      if (draft) {
-        setEstimateId(draft.id);
-        setVehicleInfo(draft.vehicleInfo);
-        setPanelData(draft.panelData);
-        setCarrierId(draft.carrierId);
-        setPhotos(draft.photos);
-      } else {
-        setEstimateId(createEstimateId());
+    let cancel = false;
+    (async () => {
+      try {
+        let rows = [];
+        try {
+          rows = await loadScopes();
+        } catch (err) {
+          console.error("[HailSpec] Could not open on-phone storage", err);
+        }
+        let all = rows.map((row) => normalizeEstimate(row));
+        const migrated = await readMeta("migratedV1").catch(() => "");
+        if (migrated !== "1") {
+          const draft = parseDraft(localStorage.getItem(DRAFT_STORAGE_KEY));
+          const saved = parseSavedEstimates(localStorage.getItem(SAVED_STORAGE_KEY));
+          for (const item of [draft, ...saved].filter(Boolean)) {
+            const scope = normalizeEstimate(item);
+            if (!all.some((entry) => entry.id === scope.id)) all.push(scope);
+          }
+          for (const scope of all) await saveScope(scope);
+          await saveMeta("migratedV1", "1");
+        }
+        const activeId = await readMeta("activeId").catch(() => "");
+        let current = all.find((scope) => scope.id === activeId);
+        if (!current) {
+          current = all.slice().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0];
+        }
+        if (!current) {
+          current = normalizeEstimate({ id: createEstimateId(), vehicleInfo: blankVehicle(), panelData: {}, photos: [] });
+          all = [current];
+          await saveScope(current);
+        }
+        await saveMeta("activeId", current.id);
+        if (cancel) return;
+        setLibrary(all);
+        rememberScope(current);
+      } catch (err) {
+        console.error("[HailSpec] Could not read the saved scope", err);
+        if (!cancel) setEstimateId(createEstimateId());
       }
-      setSavedEstimates(parseSavedEstimates(localStorage.getItem(SAVED_STORAGE_KEY)));
-    } catch (err) {
-      console.error("[HailSpec] Could not read the saved draft", err);
-      setEstimateId(createEstimateId());
-    }
-    setHydrated(true);
+      if (!cancel) setHydrated(true);
+    })();
+    return () => { cancel = true; };
   }, []);
 
   useEffect(() => {
     if (!hydrated || !estimateId) return undefined;
     setSaveStatus("saving");
-    const timer = setTimeout(() => persistDraft(draftRef.current), 200);
+    const timer = setTimeout(() => { persistScope(scopeRef.current); }, 400);
     return () => clearTimeout(timer);
-  }, [hydrated, estimateId, vehicleInfo, panelData, carrierId, photos, persistDraft]);
+  }, [hydrated, estimateId, createdAt, vehicleInfo, panelData, carrierId, photos, syncStatus, lead, queuedAt, sentAt, persistScope]);
 
   useEffect(() => {
     if (!hydrated) return undefined;
-    const flush = () => persistDraft(draftRef.current);
+    const flush = () => { if (scopeRef.current?.id) persistScope(scopeRef.current); };
     window.addEventListener("pagehide", flush);
     const onHide = () => {
       if (document.visibilityState === "hidden") flush();
@@ -821,16 +810,62 @@ function HailEstimator() {
       window.removeEventListener("pagehide", flush);
       document.removeEventListener("visibilitychange", onHide);
     };
-  }, [hydrated, persistDraft]);
+  }, [hydrated, persistScope]);
 
   useEffect(() => {
-    if (!hydrated) return;
-    try {
-      localStorage.setItem(SAVED_STORAGE_KEY, JSON.stringify(savedEstimates));
-    } catch (err) {
-      console.error("[HailSpec] Could not save the estimate list", err);
+    const standalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+    if (!standalone && localStorage.getItem("hailspec.install.dismissed") !== "1") setShowInstall(true);
+    const onPrompt = (event) => {
+      event.preventDefault();
+      setInstallEvent(event);
+      setShowInstall(true);
+    };
+    const onOnline = () => setOnline(true);
+    const onOffline = () => {
+      setOnline(false);
+      attemptedRef.current.clear();
+    };
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onPrompt);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated || !online || embedUrl) return undefined;
+    const current = scopeRef.current;
+    const queued = [];
+    if (current?.syncStatus === "queued" && current.lead) queued.push(current);
+    for (const scope of library) {
+      if (scope.id !== current?.id && scope.syncStatus === "queued" && scope.lead) queued.push(scope);
     }
-  }, [hydrated, savedEstimates]);
+    const next = queued.find((scope) => !attemptedRef.current.has(scope.id));
+    if (!next) return undefined;
+    const carrier = CARRIERS.find((item) => item.id === next.carrierId) || CARRIERS[0];
+    const nextSummary = buildEstimateSummary({
+      vehicleInfo: next.vehicleInfo,
+      panelData: next.panelData,
+      carrierLabel: carrier.label,
+      grandTotal: grandTotalOf(next.panelData),
+      photos: next.photos,
+    });
+    const url = buildGhlEmbedUrl({
+      formValue: GHL_FORM,
+      lead: next.lead,
+      summary: nextSummary,
+      summaryFieldId: GHL_SUMMARY_FIELD_ID,
+    });
+    if (!url) return undefined;
+    attemptedRef.current.add(next.id);
+    setSyncingId(next.id);
+    setFrameReady(false);
+    setEmbedUrl(url);
+    return undefined;
+  }, [hydrated, online, embedUrl, syncStatus, library, estimateId, lead]);
 
   const handleSavePanel = useCallback((panel, data) => setPanelData((prev) => ({ ...prev, [panel]: data })), []);
   const handleDeletePanel = useCallback((panel) => setPanelData((prev) => {
@@ -841,47 +876,99 @@ function HailEstimator() {
 
   const currentEstimate = { id: estimateId, vehicleInfo, panelData, carrierId, photos };
 
-  const startBlankEstimate = () => {
-    setPanelData({});
-    setVehicleInfo(blankVehicle());
-    setCarrierId("state_farm");
-    setPhotos([]);
+  const handleNewEstimate = () => {
+    if (estimateHasWork(currentEstimate)) {
+      const ok = window.confirm("Start a new estimate? This one stays in Saved estimates.");
+      if (!ok) return;
+      if (scopeRef.current) persistScope(scopeRef.current);
+    } else if (estimateId) {
+      setPanelData({});
+      setVehicleInfo(blankVehicle());
+      setCarrierId("state_farm");
+      setPhotos([]);
+      setSyncStatus("local");
+      setLead(null);
+      setQueuedAt("");
+      setSentAt("");
+      setView("estimate");
+      setSelectedPanel(null);
+      setShowVehicleForm(false);
+      setShowSaved(false);
+      setExportNote("");
+      setSyncMessage("");
+      return;
+    }
+    const fresh = normalizeEstimate({ id: createEstimateId(), vehicleInfo: blankVehicle(), panelData: {}, photos: [], carrierId: "state_farm" });
+    rememberScope(fresh);
     setView("estimate");
     setSelectedPanel(null);
     setShowVehicleForm(false);
     setShowSaved(false);
     setExportNote("");
-    setFinishedNote("");
+    setSyncMessage("");
     setEmailTo("");
-    setEstimateId(createEstimateId());
-  };
-
-  const handleNewEstimate = () => {
-    if (estimateHasWork(currentEstimate)) {
-      const ok = window.confirm("Start a new estimate? This one stays in Saved estimates.");
-      if (!ok) return;
-      setSavedEstimates((list) => archiveEstimate(list, currentEstimate));
-    }
-    startBlankEstimate();
+    persistScope(fresh);
+    saveMeta("activeId", fresh.id).catch(() => {});
   };
 
   const handleOpenSaved = (id) => {
-    const result = openSavedEstimate(savedEstimates, currentEstimate, id);
-    if (!result.estimate) return;
-    setSavedEstimates(result.saved);
-    setEstimateId(result.estimate.id);
-    setVehicleInfo(result.estimate.vehicleInfo);
-    setPanelData(result.estimate.panelData);
-    setCarrierId(result.estimate.carrierId);
-    setPhotos(result.estimate.photos);
+    if (id === estimateId) {
+      setShowSaved(false);
+      return;
+    }
+    if (scopeRef.current) persistScope(scopeRef.current);
+    const item = library.find((scope) => scope.id === id);
+    if (!item) return;
+    rememberScope(normalizeEstimate(item));
     setView("estimate");
     setSelectedPanel(null);
     setShowSaved(false);
-    setFinishedNote("");
+    setSyncMessage("");
+    saveMeta("activeId", id).catch(() => {});
   };
 
   const handleRemoveSaved = (id) => {
-    setSavedEstimates((list) => list.filter((item) => item.id !== id));
+    deleteScope(id).catch(() => {});
+    setLibrary((list) => list.filter((item) => item.id !== id));
+    if (id !== estimateId) return;
+    const fresh = normalizeEstimate({ id: createEstimateId(), vehicleInfo: blankVehicle(), panelData: {}, photos: [] });
+    rememberScope(fresh);
+    persistScope(fresh);
+    saveMeta("activeId", fresh.id).catch(() => {});
+  };
+
+  const handleQueueLead = (nextLead) => {
+    const queued = queueForSync(scopeRef.current || currentEstimate, nextLead);
+    setLead(queued.lead);
+    setSyncStatus("queued");
+    setQueuedAt(queued.queuedAt);
+    setSentAt("");
+    attemptedRef.current.delete(estimateId);
+    setSyncMessage(online
+      ? "Opening the NTX Hail form. Submit it there, then tap Submitted."
+      : "Waiting for signal. This scope stays on the phone until the form goes through.");
+  };
+
+  const handleConfirmSent = () => {
+    const id = syncingId || estimateId;
+    const source = id === estimateId ? scopeRef.current : library.find((item) => item.id === id);
+    const result = confirmScopeSent({ ...(source || {}), syncStatus: "queued", id }, { frameLoaded: frameReady });
+    if (!result.ok) return;
+    if (id === estimateId) {
+      setSyncStatus("sent");
+      setSentAt(result.scope.sentAt);
+      scopeRef.current = { ...scopeRef.current, ...result.scope };
+    }
+    persistScope(result.scope);
+    setEmbedUrl("");
+    setFrameReady(false);
+    setSyncMessage("Sent.");
+  };
+
+  const handleCloseForm = () => {
+    setEmbedUrl("");
+    setFrameReady(false);
+    setSyncMessage("Still waiting for signal. Nothing was marked sent.");
   };
 
   const handleCarrier = (nextId) => {
@@ -903,7 +990,11 @@ function HailEstimator() {
     panelData,
     carrierLabel: activeCarrier.label,
     grandTotal,
+    photos,
   });
+  const sizeTotals = vehicleSizeTotals(panelData);
+  const photoGroups = groupPhotosForReport(photos);
+  const savedEstimates = library.filter((item) => item.id !== estimateId && estimateHasWork(item));
 
   const handleDownloadReport = async () => {
     setExportNote("");
@@ -958,48 +1049,87 @@ function HailEstimator() {
     setTimeout(() => setShowEmailDone(false), 3000);
   };
 
-  const handleDownloadPhotosZip = async () => {
-    if (!photos.length || zipLoading) return;
-    setZipLoading(true);
+  const bytesFromPhoto = async (photo) => {
+    if (photo?.blob && typeof photo.blob.arrayBuffer === "function") return new Uint8Array(await photo.blob.arrayBuffer());
+    const source = String(photo?.url || photo?.thumb || "");
+    const comma = source.indexOf(",");
+    if (!source.startsWith("data:") || comma < 0) return null;
+    const binary = atob(source.slice(comma + 1));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  };
+
+  const handleShareExport = async () => {
+    if (exporting) return;
+    setExporting(true);
+    setExportNote("");
     try {
-      if (!window.JSZip) {
-        await new Promise((resolve, reject) => {
-          const script = document.createElement("script");
-          script.src = "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js";
-          script.onload = resolve;
-          script.onerror = reject;
-          document.head.appendChild(script);
-        });
-      }
-      const zip = new window.JSZip();
-      const vehicle = [vehicleInfo.year, vehicleInfo.make, vehicleInfo.model].filter(Boolean).join("_") || "Vehicle";
-      const folder = zip.folder(`NTXHail_Photos_${vehicle}`);
-      photos.forEach((photo, index) => {
-        const [header, base64] = String(photo.url || "").split(",");
-        if (!base64) return;
-        const ext = (header.match(/data:image\/(\w+)/) || [])[1] || "jpg";
-        const safeName = `${index + 1}_${(photo.name || `photo.${ext}`).replace(/[^a-zA-Z0-9._-]/g, "_")}`;
-        folder.file(safeName, base64, { base64: true });
+      const pdfBytes = buildEstimatePdf({
+        vehicleInfo,
+        panelData,
+        carrierLabel: activeCarrier.label,
+        grandTotal,
+        photos,
       });
-      const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
-      const url = URL.createObjectURL(blob);
+      const paths = {};
+      const media = [];
+      for (let index = 0; index < photos.length; index += 1) {
+        const photo = photos[index];
+        const path = mediaExportPath(photo, index);
+        paths[photo.id] = path;
+        const bytes = await bytesFromPhoto(photo);
+        if (bytes) media.push({ name: path, data: bytes });
+        if (photo.note) media.push({ name: path.replace(/\.[^.]+$/, ".txt"), data: photo.note });
+      }
+      const html = buildPacketHtml({
+        vehicleInfo,
+        panelData,
+        carrierLabel: activeCarrier.label,
+        grandTotal,
+        photos,
+      }, paths);
+      const zipBytes = buildZip([
+        { name: "estimate.txt", data: summary },
+        { name: estimatePdfName(vehicleInfo), data: pdfBytes },
+        { name: "estimate.html", data: html },
+        ...media,
+      ]);
+      const vehicle = [vehicleInfo.year, vehicleInfo.make, vehicleInfo.model].filter(Boolean).join("_") || "Scope";
+      const filename = `HailSpec_${vehicle.replace(/[^A-Za-z0-9._-]/g, "")}.zip`;
+      const file = new File([zipBytes], filename, { type: "application/zip" });
+      const touch = navigator.maxTouchPoints > 0;
+      if (touch && typeof navigator.canShare === "function" && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: "HailSpec scope" });
+          setExportNote("Use the share sheet to save or send the scope.");
+          return;
+        } catch (err) {
+          if (err && err.name === "AbortError") return;
+        }
+      }
+      const url = URL.createObjectURL(new Blob([zipBytes], { type: "application/zip" }));
       const link = document.createElement("a");
       link.href = url;
-      link.download = `NTXHail_Photos_${vehicle}.zip`;
+      link.download = filename;
+      link.rel = "noopener";
       document.body.appendChild(link);
       link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2500);
+      setExportNote("Scope package downloaded.");
     } catch (err) {
-      console.error("[HailSpec] Zip download failed:", err);
+      console.error("[HailSpec] Export failed", err);
+      setExportNote("Could not build the package. Use Print, then save it as a PDF.");
+    } finally {
+      setExporting(false);
     }
-    setZipLoading(false);
   };
 
   const S = styles;
   const vehicleLabel = [vehicleInfo.year, vehicleInfo.make, vehicleInfo.model].filter(Boolean).join(" ");
   const report = reportDocument({ vehicleInfo, panelData, carrierLabel: activeCarrier.label, grandTotal });
-  const saveLabel = saveStatus === "error" ? "Not saved" : saveStatus === "saved" ? "Saved on this phone" : saveStatus === "saving" ? "Saving" : "by NTX Hail";
+  const saveLabel = saveStatus === "error" ? "Not saved" : saveStatus === "saving" ? "Saving" : syncStatusLabel(syncStatus);
 
   if (!hydrated) {
     return (
@@ -1036,6 +1166,17 @@ function HailEstimator() {
           Saved{savedEstimates.length > 0 ? ` ${savedEstimates.length}` : ""}
         </button>
       </div>
+      {!online && <p style={S.offlineBar}>No signal. This scope stays on the phone.</p>}
+      {showInstall && (
+        <div style={S.installCard}>
+          <div style={S.installTitle}>Add HailSpec to your Home Screen</div>
+          <p style={S.installText}>After one visit with signal, it opens and works with no service. On iPhone, tap Share, then Add to Home Screen. On Android, tap Install or use the browser menu.</p>
+          <div style={S.installActions}>
+            {installEvent && <button type="button" style={S.newEstimateBtn} onClick={async () => { await installEvent.prompt(); setShowInstall(false); }}>Install</button>}
+            <button type="button" style={S.savedBtn} onClick={() => { localStorage.setItem("hailspec.install.dismissed", "1"); setShowInstall(false); }}>Not now</button>
+          </div>
+        </div>
+      )}
 
       {(vehicleInfo.owner || vehicleInfo.year || vehicleInfo.make) && !showVehicleForm && (
         <button type="button" onClick={() => setShowVehicleForm(true)} style={S.customerBar}>
@@ -1075,6 +1216,9 @@ function HailEstimator() {
 
       <div style={S.tabs}>
         <button type="button" onClick={() => setView("estimate")} style={{ ...S.tab, ...(view === "estimate" ? S.tabActive : {}) }}>Estimate</button>
+        <button type="button" onClick={() => setView("media")} style={{ ...S.tab, ...(view === "media" ? S.tabActive : {}) }}>
+          Media{photos.length > 0 && <span style={S.badge}>{photos.length}</span>}
+        </button>
         <button type="button" onClick={() => setView("review")} style={{ ...S.tab, ...(view === "review" ? S.tabActive : {}) }}>
           Review{panels.length > 0 && <span style={S.badge}>{panels.length}</span>}
         </button>
@@ -1084,9 +1228,10 @@ function HailEstimator() {
         <div style={S.body}>
           <div style={S.statsStrip}>
             <div style={S.stat}><div style={S.statVal}>{panels.length}</div><div style={S.statLabel}>Panels</div></div>
-            <div style={S.stat}><div style={S.statVal}>{totalDents}</div><div style={S.statLabel}>Max dents</div></div>
+            <div style={S.stat}><div style={S.statVal}>{totalDents}</div><div style={S.statLabel}>Dents</div></div>
             <div style={S.stat}><div style={{ ...S.statVal, color: "#2563eb" }}>${grandTotal.toLocaleString("en-US")}</div><div style={S.statLabel}>Total</div></div>
           </div>
+          {sizeTotals.text && <p style={S.dentTotals}>{sizeTotals.text}</p>}
           <p style={S.disclaimer}>{ESTIMATE_DISCLAIMER}</p>
           <div style={S.carSection}>
             <div style={S.sectionHead}>
@@ -1101,7 +1246,6 @@ function HailEstimator() {
               ))}
             </div>
           </div>
-          <div style={S.section}><div style={S.sectionLabel}>Photos</div><CameraCapture photos={photos} setPhotos={setPhotos} /></div>
           {panels.length > 0 && (
             <div style={S.section}>
               <div style={S.sectionLabel}>Damage log</div>
@@ -1109,7 +1253,7 @@ function HailEstimator() {
                 <button key={key} type="button" onClick={() => setSelectedPanel(key)} style={S.logItem}>
                   <div style={{ minWidth: 0 }}>
                     <div style={S.logPanel}>{PANEL_LABELS[key]}</div>
-                    <div style={S.logMeta}>{data.rrEnabled ? "R&R — Remove & Replace" : data.convEnabled ? "Conventional Repair" : `${data.selectedRange || data.count} ${(DENT_SIZE_LABELS[data.size] || "").toLowerCase()} dents${(data.addons || []).length > 0 ? " • add-on" : ""}`}{data.riEnabled ? " • R&I" : ""}</div>
+                    <div style={S.logMeta}>{formatPanelDamage(data)}{(data.addons || []).length > 0 ? " • add-on" : ""}{data.riEnabled ? " • R&I" : ""}</div>
                   </div>
                   <div style={S.logPrice}>${Number(data.totalPrice || 0).toLocaleString("en-US")}</div>
                 </button>
@@ -1120,9 +1264,15 @@ function HailEstimator() {
         </div>
       )}
 
+      {view === "media" && (
+        <div style={S.body}>
+          <MediaScreen photos={photos} panelData={panelData} onChange={setPhotos} onEditPanel={setSelectedPanel} />
+        </div>
+      )}
+
       {view === "review" && (
         <div style={S.body}>
-          {panels.length === 0 ? (
+          {panels.length === 0 && photos.length === 0 ? (
             <div style={S.emptyState}>
               <div style={{ fontWeight: 700, marginBottom: 4 }}>No panels yet</div>
               <div style={{ color: "#64748b", fontSize: 14 }}>Add damage on the Estimate tab, then come back to send it.</div>
@@ -1140,30 +1290,28 @@ function HailEstimator() {
                   <div style={S.grandTotal}>${grandTotal.toLocaleString("en-US")}</div>
                 </div>
                 <div>
-                  {panels.map(([key, data]) => {
-                    const nonPdr = data.rrEnabled || data.convEnabled;
-                    const mode = data.rrEnabled ? "R&R" : data.convEnabled ? "Conventional" : `${data.selectedRange || data.count} ${(DENT_SIZE_LABELS[data.size] || "").toLowerCase()}`;
-                    return (
+                  {panels.map(([key, data]) => (
                       <div key={key} style={S.reviewItem}>
                         <div style={S.reviewItemTop}>
                           <span style={S.reviewItemName}>{PANEL_LABELS[key]}</span>
                           <span style={S.reviewItemPrice}>${Number(data.totalPrice || 0).toLocaleString("en-US")}</span>
                         </div>
-                        <div style={S.reviewItemMeta}>{mode}{data.riEnabled ? ` • R&I $${Number(data.riTotalCost || 0).toFixed(0)}` : ""}</div>
+                        <div style={S.reviewItemMeta}>{formatPanelDamage(data)}{data.riEnabled ? ` • R&I $${Number(data.riTotalCost || 0).toFixed(0)}` : ""}</div>
                       </div>
-                    );
-                  })}
+                  ))}
+                  {sizeTotals.text && <div style={S.reviewItemMeta}>{sizeTotals.text}</div>}
                   <div style={S.rtTotal}>
                     <span>Grand total</span>
                     <span>${grandTotal.toLocaleString("en-US")}</span>
                   </div>
                 </div>
               </div>
-              <p style={S.disclaimer}>Max dents adds the top of each dent range. It is not an exact dent count. {ESTIMATE_DISCLAIMER}</p>
-              {finishedNote && <p style={S.leadOk}>{finishedNote}</p>}
-              <LeadCapture summary={summary} onFormClosed={() => setFinishedNote("The form is open for you to submit. This estimate stays saved on this phone.")} />
+              <p style={S.disclaimer}>{ESTIMATE_DISCLAIMER}</p>
+              <p style={S.statusLine} role="status">{syncStatusLabel(syncStatus)}{syncMessage ? ` · ${syncMessage}` : ""}</p>
+              <LeadCapture summary={summary} onQueue={handleQueueLead} />
               <div style={S.section}>
                 <div style={S.sectionLabel}>Export</div>
+                <button type="button" onClick={handleShareExport} disabled={exporting} style={{ ...S.saveBtn, width: "100%", marginBottom: 8 }}>{exporting ? "Building package…" : "Share / Export"}</button>
                 <div style={S.exportStack}>
                   <button type="button" onClick={handlePrint} style={S.exportBtn}>Print</button>
                   <button type="button" onClick={handleDownloadReport} style={S.exportBtn}>Download PDF</button>
@@ -1184,9 +1332,9 @@ function HailEstimator() {
                 <div style={S.section}>
                   <div style={S.sectionHead}>
                     <div style={{ ...S.sectionLabel, marginBottom: 0 }}>Photos ({photos.length})</div>
-                    <button type="button" onClick={handleDownloadPhotosZip} disabled={zipLoading} style={S.inlineBtn}>{zipLoading ? "Zipping…" : "Download ZIP"}</button>
+                    <button type="button" onClick={() => setView("media")} style={S.inlineBtn}>Open media</button>
                   </div>
-                  <div style={S.photoGrid}>{photos.map((photo, index) => <img key={index} src={photo.url} alt="" style={S.reviewPhoto} />)}</div>
+                  <div style={S.photoGrid}>{photos.filter((photo) => photo.thumb || photo.url).slice(0, 6).map((photo) => <img key={photo.id} src={photo.thumb || photo.url} alt="" style={S.reviewPhoto} />)}</div>
                 </div>
               )}
             </>
@@ -1222,7 +1370,7 @@ function HailEstimator() {
                   <div key={item.id} style={S.savedRow}>
                     <button type="button" onClick={() => handleOpenSaved(item.id)} style={S.savedOpen}>
                       <span style={S.logPanel}>{estimateTitle(item)}</span>
-                      <span style={S.logMeta}>{count} panel{count === 1 ? "" : "s"} · ${total.toLocaleString("en-US")}{date ? ` · ${date}` : ""}</span>
+                      <span style={S.logMeta}>{syncStatusLabel(item.syncStatus)} · {count} panel{count === 1 ? "" : "s"} · ${total.toLocaleString("en-US")}{date ? ` · ${date}` : ""}</span>
                     </button>
                     <button type="button" onClick={() => handleRemoveSaved(item.id)} style={S.savedRemove}>Remove</button>
                   </div>
@@ -1264,15 +1412,40 @@ function HailEstimator() {
         </tbody>
       </table>
       <p className="print-disclaimer">{report.disclaimer}</p>
-      {photos.some((photo) => typeof photo?.url === "string" && photo.url.startsWith("data:image/")) && (
-        <div className="print-photos">
-          {photos.filter((photo) => typeof photo?.url === "string" && photo.url.startsWith("data:image/")).map((photo, index) => (
-            <img key={index} src={photo.url} alt="" />
-          ))}
-        </div>
-      )}
+      {report.sizeTotals && <p className="print-disclaimer">{report.sizeTotals}</p>}
+      {photoGroups.map((group) => (
+        <section key={`${group.tab}-${group.tile}`}>
+          <h2 className="print-kicker">{group.tab}</h2>
+          <h3>{group.tile} ({group.photos.length})</h3>
+          <div className="print-photos">
+            {group.photos.map((photo) => {
+              const src = photo.thumb || (typeof photo.url === "string" && photo.url.startsWith("data:image/") ? photo.url : "");
+              if (photo.kind === "video" || !src) return <p key={photo.id}>Video: {photo.tileLabel || photo.name || "Video"}{photo.note ? ` — ${photo.note}` : ""}</p>;
+              return (
+                <figure key={photo.id}>
+                  <img src={src} alt="" />
+                  {photo.note ? <figcaption>{photo.note}</figcaption> : null}
+                </figure>
+              );
+            })}
+          </div>
+        </section>
+      ))}
       <p className="print-footer">Generated by HailSpec. ntxhail.com</p>
     </article>
+    {embedUrl && (
+      <div style={S.ghlOverlay} role="dialog" aria-modal="true" aria-label="NTX Hail estimate form">
+        <div style={S.ghlBar}>
+          <div style={{ minWidth: 0 }}>
+            <div style={S.ghlTitle}>Send to NTX Hail</div>
+            <p style={S.ghlHint}>Check the consent boxes and submit the form. Then tap Submitted. Photos are not attached here — use Share / Export for those.</p>
+          </div>
+          <button type="button" onClick={handleConfirmSent} disabled={!frameReady} style={{ ...S.ghlClose, background: frameReady ? "#2563eb" : "#e2e8f0", color: frameReady ? "#fff" : "#64748b" }}>Submitted</button>
+          <button type="button" onClick={handleCloseForm} style={S.ghlClose}>Close</button>
+        </div>
+        <iframe title="NTX Hail estimate form" src={embedUrl} style={S.ghlFrame} onLoad={() => setFrameReady(true)} />
+      </div>
+    )}
     </>
   );
 }
@@ -1307,6 +1480,16 @@ const styles = {
   logo: { display: "flex", alignItems: "center", gap: 10 },
   logoText: { fontWeight: 900, fontSize: 17, letterSpacing: "1.5px", color: "#ffffff", lineHeight: 1 },
   logoSub: { fontSize: 12, color: "#93c5fd", fontWeight: 700, letterSpacing: "0.2px", marginTop: 2 },
+  offlineBar: { margin: 0, padding: "8px 16px", background: "#fff7ed", color: "#9a3412", fontWeight: 800, fontSize: 14 },
+  installCard: { margin: "10px 16px 0", background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 12, padding: 12 },
+  installTitle: { fontWeight: 800, marginBottom: 4 },
+  installText: { fontSize: 14, color: "#1e3a8a", margin: "0 0 8px", lineHeight: 1.4 },
+  installActions: { display: "flex", gap: 8 },
+  dentTotals: { margin: "0 0 12px", fontSize: 14, fontWeight: 700, color: "#1e3a8a", lineHeight: 1.4 },
+  statusLine: { margin: "0 0 12px", fontSize: 14, fontWeight: 800, color: "#0f172a" },
+  countRow: { display: "flex", alignItems: "center", gap: 10, marginBottom: 8 },
+  countLabel: { flex: 1, fontSize: 16, fontWeight: 800, color: "#0f172a" },
+  countInput: { width: 64, height: 48, textAlign: "center", fontSize: 18, fontWeight: 800, color: "#0f172a", border: "none", borderLeft: "1px solid #e2e8f0", borderRight: "1px solid #e2e8f0", background: "transparent", padding: 0 },
   siteLink: { minHeight: 44, display: "inline-flex", alignItems: "center", color: "#dbeafe", fontWeight: 700, fontSize: 14, textDecoration: "none", padding: "8px 2px", flexShrink: 0 },
   actionRow: { display: "flex", gap: 8, padding: "10px 16px", background: "#ffffff", borderBottom: "1px solid #e2e8f0" },
   newEstimateBtn: { flex: 1.4, minHeight: 48, background: "#2563eb", border: "none", borderRadius: 10, padding: "12px 14px", color: "#ffffff", fontSize: 16, fontWeight: 800, cursor: "pointer" },
@@ -1627,7 +1810,7 @@ const styles = {
   optional: { fontWeight: 500, color: "#94a3b8" },
   summaryPreview: { whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 12, fontSize: 12, lineHeight: 1.45, color: "#334155", margin: "4px 0 12px", maxHeight: 180, overflowY: "auto" },
   ghlOverlay: { position: "fixed", top: 0, right: 0, bottom: 0, left: 0, zIndex: 200, background: "#ffffff", display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top)", overflow: "hidden" },
-  ghlBar: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderBottom: "1px solid #e2e8f0", flexShrink: 0, background: "#ffffff" },
+  ghlBar: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "10px 12px", borderBottom: "1px solid #e2e8f0", flexShrink: 0, background: "#ffffff", flexWrap: "wrap" },
   ghlTitle: { fontSize: 16, fontWeight: 800, color: "#0f172a" },
   ghlHint: { fontSize: 13, lineHeight: 1.35, color: "#475569", margin: "2px 0 0" },
   ghlClose: { minWidth: 44, minHeight: 44, padding: "10px 14px", borderRadius: 10, border: "1px solid #e2e8f0", background: "#f8fafc", color: "#0f172a", fontSize: 15, fontWeight: 700, cursor: "pointer", flexShrink: 0 },
